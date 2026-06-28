@@ -411,9 +411,9 @@ describe('Browser actor', () => {
     });
   });
 
-  // ── browse:resources-requested ─────────────────────────────────────────────
+  // ── browse:resources-page-requested ───────────────────────────────────────
 
-  describe('browse:resources-requested', () => {
+  describe('browse:resources-page-requested', () => {
     let mockListResources: ReturnType<typeof vi.fn>;
 
     const makeResource = (id: string, name: string, dateCreated: string) => ({
@@ -425,13 +425,13 @@ describe('Browser actor', () => {
     });
 
     function resultPromise() {
-      return new Promise<any>((resolve) => eventBus.get('browse:resources-result').subscribe(resolve));
+      return new Promise<any>((resolve) => eventBus.get('browse:resources-page-result').subscribe(resolve));
     }
     function failedPromise() {
-      return new Promise<any>((resolve) => eventBus.get('browse:resources-failed').subscribe(resolve));
+      return new Promise<any>((resolve) => eventBus.get('browse:resources-page-failed').subscribe(resolve));
     }
     function fire(payload: object) {
-      eventBus.get('browse:resources-requested').next(payload as any);
+      eventBus.get('browse:resources-page-requested').next(payload as any);
     }
 
     beforeEach(async () => {
@@ -511,7 +511,7 @@ describe('Browser actor', () => {
       expect(response.limit).toBe(10);
     });
 
-    it('emits browse:resources-failed when graph throws', async () => {
+    it('emits browse:resources-page-failed when graph throws', async () => {
       mockListResources.mockRejectedValue(new Error('Graph exploded'));
       const p = failedPromise();
       fire({ correlationId: 'r-8' });
