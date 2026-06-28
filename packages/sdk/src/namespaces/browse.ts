@@ -283,6 +283,28 @@ export class BrowseNamespace implements IBrowseNamespace {
 
   // ── One-shot reads ──────────────────────────────────────────────────────
 
+  async resourcesPage(filters?: ResourceListFilters & { offset?: number }): Promise<{
+    resources: ResourceDescriptor[];
+    total: number;
+    offset: number;
+    limit: number;
+  }> {
+    const search = filters?.search ? searchQuery(filters.search) : undefined;
+    return busRequest<{ resources: ResourceDescriptor[]; total: number; offset: number; limit: number }>(
+      this.transport,
+      'browse:resources-requested',
+      {
+        search,
+        archived: filters?.archived,
+        entityType: filters?.entityType,
+        limit: filters?.limit ?? 50,
+        offset: filters?.offset ?? 0,
+      },
+      'browse:resources-result',
+      'browse:resources-failed',
+    );
+  }
+
   async resourceContent(resourceId: ResourceId): Promise<string> {
     const result = await this.content.getBinary(resourceId);
     // Decode with the charset the response advertises — no blind UTF-8.

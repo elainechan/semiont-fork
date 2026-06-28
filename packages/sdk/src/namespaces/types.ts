@@ -206,6 +206,7 @@ export interface BrowseNamespace {
   events(resourceId: ResourceId): CacheObservable<StoredEventResponse[]>;
 
   // One-shot reads (Promise — no caching, no live update)
+  resourcesPage(filters?: { limit?: number; archived?: boolean; search?: string; entityType?: string; offset?: number }): Promise<{ resources: ResourceDescriptor[]; total: number; offset: number; limit: number }>;
   resourceContent(resourceId: ResourceId): Promise<string>;
   resourceGraph(resourceId: ResourceId): Promise<GetResourceResponse>;
   resourceRepresentation(resourceId: ResourceId): Promise<{ data: ArrayBuffer; contentType: string }>;

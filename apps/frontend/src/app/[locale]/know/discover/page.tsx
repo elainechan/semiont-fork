@@ -26,6 +26,9 @@ export default function DiscoverPage() {
 
   const activePanel = useObservable(stateUnit.browse.activePanel$) ?? null;
   const recentDocuments = useObservable(stateUnit.recentResources$) ?? [];
+  const recentTotal = useObservable(stateUnit.recentTotal$) ?? 0;
+  const hasMoreRecent = useObservable(stateUnit.hasMoreRecent$) ?? false;
+  const isLoadingMore = useObservable(stateUnit.isLoadingMore$) ?? false;
   const entityTypes = useObservable(stateUnit.entityTypes$) ?? [];
   const isLoadingRecent = useObservable(stateUnit.isLoadingRecent$) ?? true;
   const searchQuery = useObservable(stateUnit.search.query$) ?? '';
@@ -49,6 +52,10 @@ export default function DiscoverPage() {
       entityTypes={entityTypes}
       isLoadingRecent={isLoadingRecent}
       isSearching={isSearching}
+      recentTotal={recentTotal}
+      hasMoreRecent={hasMoreRecent}
+      isLoadingMore={isLoadingMore}
+      onLoadMoreRecent={stateUnit.loadMoreRecent}
       searchQuery={searchQuery}
       onSearchQueryChange={stateUnit.search.setQuery}
       selectedEntityType={selectedEntityType}
@@ -75,6 +82,8 @@ export default function DiscoverPage() {
         archived: t('archived'),
         created: t('created'),
         loadingKnowledgeBase: t('loadingKnowledgeBase'),
+        loadMore: t('loadMore'),
+        resourceCount: (n: number) => t('resourceCount', { count: n }),
       }}
       ToolbarPanels={ToolbarPanels}
     />

@@ -31,6 +31,10 @@ const createMockProps = (overrides?: Partial<ResourceDiscoveryPageProps>): Resou
   entityTypes: [],
   isLoadingRecent: false,
   isSearching: false,
+  recentTotal: 0,
+  hasMoreRecent: false,
+  isLoadingMore: false,
+  onLoadMoreRecent: vi.fn(),
   searchQuery: '',
   onSearchQueryChange: vi.fn(),
   selectedEntityType: '',
@@ -57,6 +61,8 @@ const createMockProps = (overrides?: Partial<ResourceDiscoveryPageProps>): Resou
     archived: 'Archived',
     created: 'Created:',
     loadingKnowledgeBase: 'Loading knowledge base...',
+    loadMore: 'Load more',
+    resourceCount: (n: number) => `${n} resources`,
   },
   ToolbarPanels: ({ children }: any) => <div data-testid="toolbar-panels">{children}</div>,
   ...overrides,
@@ -353,6 +359,90 @@ describe('ResourceDiscoveryPage', () => {
         }),
         undefined,
       );
+    });
+  });
+
+  describe('Pagination', () => {
+    it('shows total resource count when recentTotal > 0 and not searching', () => {
+      const props = createMockProps({
+        recentTotal: 31844,
+        recentDocuments: [createMockResource('1', 'Doc 1')],
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.getByText('31844 resources')).toBeInTheDocument();
+    });
+
+    it('does not show total count when searching', () => {
+      const props = createMockProps({
+        recentTotal: 31844,
+        searchQuery: 'something',
+        searchDocuments: [createMockResource('1', 'Doc 1')],
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.queryByText('31844 resources')).not.toBeInTheDocument();
+    });
+
+    it('does not show total count when recentTotal is 0', () => {
+      const props = createMockProps({ recentTotal: 0, recentDocuments: [] });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.queryByText('0 resources')).not.toBeInTheDocument();
+    });
+
+    it('shows Load more button when hasMoreRecent is true and not searching', () => {
+      const props = createMockProps({
+        hasMoreRecent: true,
+        recentDocuments: [createMockResource('1', 'Doc 1')],
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+    });
+
+    it('does not show Load more button when searching', () => {
+      const props = createMockProps({
+        hasMoreRecent: true,
+        searchQuery: 'foo',
+        searchDocuments: [createMockResource('1', 'Doc 1')],
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    });
+
+    it('does not show Load more button when hasMoreRecent is false', () => {
+      const props = createMockProps({ hasMoreRecent: false });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    });
+
+    it('calls onLoadMoreRecent when Load more button is clicked', () => {
+      const onLoadMoreRecent = vi.fn();
+      const props = createMockProps({
+        hasMoreRecent: true,
+        recentDocuments: [createMockResource('1', 'Doc 1')],
+        onLoadMoreRecent,
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+
+      expect(onLoadMoreRecent).toHaveBeenCalledTimes(1);
+    });
+
+    it('disables Load more button and shows searching text when isLoadingMore', () => {
+      const props = createMockProps({
+        hasMoreRecent: true,
+        isLoadingMore: true,
+        recentDocuments: [createMockResource('1', 'Doc 1')],
+      });
+      renderWithProviders(<ResourceDiscoveryPage {...props} />);
+
+      const btn = screen.getByRole('button', { name: 'Searching...' });
+      expect(btn).toBeDisabled();
     });
   });
 });

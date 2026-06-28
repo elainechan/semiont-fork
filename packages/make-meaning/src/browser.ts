@@ -25,7 +25,7 @@ import type { SemiontProject } from '@semiont/core/node';
 import type { EventMap, Logger, components } from '@semiont/core';
 import { EventBus, resourceId, annotationId, errField } from '@semiont/core';
 import { withActorSpan } from '@semiont/observability';
-import { getExactText, getTargetSource, getTargetSelector, getResourceEntityTypes, getBodySource } from '@semiont/core';
+import { getExactText, getTargetSource, getTargetSelector, getBodySource } from '@semiont/core';
 import { EventQuery } from '@semiont/event-sourcing';
 import type { ViewStorage } from '@semiont/event-sourcing';
 import type { KnowledgeBase } from './knowledge-base';
@@ -113,31 +113,26 @@ export class Browser {
 
   private async handleBrowseResources(event: EventMap['browse:resources-requested']): Promise<void> {
     try {
-      let filteredDocs = await ResourceContext.listResources({
+      const offset = event.offset ?? 0;
+      const limit = Math.min(event.limit ?? 50, 500);
+
+      const { resources: page, total } = await this.kb.graph.listResources({
         search: event.search,
         archived: event.archived,
-      }, this.kb);
+        entityTypes: event.entityType ? [event.entityType] : undefined,
+        offset,
+        limit,
+      });
 
-      // Filter by entity type
-      if (event.entityType) {
-        filteredDocs = filteredDocs.filter((doc) => getResourceEntityTypes(doc).includes(event.entityType!));
-      }
-
-      // Paginate
-      const offset = event.offset ?? 0;
-      const limit = event.limit ?? 50;
-      const paginatedDocs = filteredDocs.slice(offset, offset + limit);
-
-      // Add content previews for search results
       const formattedDocs = event.search
-        ? await ResourceContext.addContentPreviews(paginatedDocs, this.kb)
-        : paginatedDocs;
+        ? await ResourceContext.addContentPreviews(page, this.kb)
+        : page;
 
       this.eventBus.get('browse:resources-result').next({
         correlationId: event.correlationId,
         response: {
           resources: formattedDocs,
-          total: filteredDocs.length,
+          total,
           offset,
           limit,
         },
