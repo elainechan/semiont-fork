@@ -194,7 +194,7 @@ describe('createDiscoverStateUnit', () => {
   it('loadMoreRecent appends next page to recentResources$', async () => {
     let call = 0;
     const { client } = mockClient({
-      resourcesPageFn: (f) => {
+      resourcesPageFn: (_f) => {
         call++;
         if (call === 1) return Promise.resolve({ resources: [{ '@id': 'r1' }], total: 2, offset: 0, limit: 50 });
         return Promise.resolve({ resources: [{ '@id': 'r2' }], total: 2, offset: 1, limit: 50 });
@@ -235,7 +235,7 @@ describe('createDiscoverStateUnit', () => {
   it('search with an empty query yields no results without hitting resourcesPage', async () => {
     vi.useFakeTimers();
     try {
-      const { client, pagesCalls, resourceCalls } = mockClient();
+      const { client, resourceCalls } = mockClient();
       const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
       const collected: Array<{ results: unknown[]; isSearching: boolean }> = [];
