@@ -21,6 +21,7 @@ import type { components } from './types';
 import type { AnnotationId, ResourceId } from './identifiers';
 import type { StoredEvent } from './event-base';
 import type { EventOfType } from './persisted-events';
+import type { ResourceDescriptor } from './graph';
 
 // Branded overrides for OpenAPI command payloads that carry identifier
 // fields. Narrows `string` → branded at the TypeScript layer.
@@ -216,6 +217,10 @@ export type EventMap = {
   'browse:resources-requested': components['schemas']['BrowseResourcesRequest'];
   'browse:resources-result': components['schemas']['BrowseResourcesResult'];
   'browse:resources-failed': { correlationId: string } & components['schemas']['CommandError'];
+
+  'browse:resources-page-requested': { correlationId: string; offset?: number; limit?: number; archived?: boolean; entityType?: string; search?: string };
+  'browse:resources-page-result': { correlationId: string; response: { resources: ResourceDescriptor[]; total: number; offset: number; limit: number } };
+  'browse:resources-page-failed': { correlationId: string } & components['schemas']['CommandError'];
 
   'browse:annotations-requested': components['schemas']['BrowseAnnotationsRequest'];
   'browse:annotations-result': components['schemas']['BrowseAnnotationsResult'];
@@ -499,6 +504,9 @@ export const CHANNEL_SCHEMAS = {
   'browse:resources-requested':       'BrowseResourcesRequest',
   'browse:resources-result':          'BrowseResourcesResult',
   'browse:resources-failed':          null,
+  'browse:resources-page-requested':  null, // inline type, paginated graph-based listing
+  'browse:resources-page-result':     null,
+  'browse:resources-page-failed':     null,
   'browse:annotations-requested':     'BrowseAnnotationsRequest',
   'browse:annotations-result':        'BrowseAnnotationsResult',
   'browse:annotations-failed':        null,
