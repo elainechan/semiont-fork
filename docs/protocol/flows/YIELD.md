@@ -22,25 +22,27 @@ The Yield flow creates new resources from reference annotations (motivation: `li
 4. Updates the reference annotation body to link to the new resource
 5. Broadcasts real-time updates via SSE so UI reflects changes immediately
 
-**Supported Formats**: Currently available for text-based formats (`text/plain`, `text/markdown`). Generated resources are always created as `text/plain`. Support for generating from annotations in images and PDFs is planned for future releases
+**Supported Formats**: Currently available for text-based formats (`text/plain`, `text/markdown`). Generated resources take the requested `outputMediaType`, defaulting to `text/markdown`; the worker rejects any media type outside `text/markdown` | `text/plain`. Support for generating from annotations in images and PDFs is planned for future releases
 
 ## Using the API Client
 
 Generation is a long-running job. `client.yield.fromAnnotation()`
-returns an Observable that emits `yield:progress` events during LLM
-generation and finally `yield:finished` on completion (or errors on
-`yield:failed`). Under the hood it emits `job:create` via the bus
-gateway with `jobType: 'generation'`, then the Yield worker picks it
-up and publishes progress events back on the bus.
+returns an Observable that emits `progress` events during LLM
+generation and finally a `complete` event on completion (or errors on
+failure). Under the hood it emits `job:create` via the bus gateway
+with `jobType: 'generation'`, then the generation worker picks it up
+and publishes lifecycle events back on the unified job channels
+(`job:report-progress` / `job:complete` / `job:fail`), which the
+namespace filters by `jobId`.
 
 ```typescript
 import { lastValueFrom } from 'rxjs';
 
 // First, gather context for the annotation (see Gather flow)
 const gather = await lastValueFrom(
-  client.gather.annotation(annotationId, resourceId, { contextWindow: 2000 }),
+  client.gather.annotation(resourceId, annotationId, { contextWindow: 2000 }),
 );
-const context = (gather as { context: GatheredContext }).context;
+const context = (gather as { response: GatheredContext }).response;
 
 // Generate a new resource from the reference annotation. Optional
 // `entityTypes` are stamped on the synthesized resource (so
@@ -58,10 +60,10 @@ client.yield.fromAnnotation(resourceId, annotationId, {
   error: (err) => console.error(err),
 });
 
-// Events seen by subscribers:
-//   yield:progress  — { status, percentage, message }
-//   yield:finished  — { resourceId, referenceId, sourceResourceId, ... }
-//   yield:failed    — { error }
+// Events seen by subscribers (discriminated YieldGenerationEvent):
+//   { kind: 'progress', data: JobProgress }          — from job:report-progress
+//   { kind: 'complete', data: JobCompleteCommand }   — from job:complete (terminal)
+// Failure (job:fail) surfaces as the Observable's error.
 ```
 
 ## Reference Annotation Structure
@@ -139,11 +141,15 @@ Backend job:create handler builds a PendingJob, persists to queue, returns job:c
     ↓
 Worker (separate process, subscribed to job:queued) claims it via job:claim bus command
     ↓
-Worker generates content → creates resource → updates annotation
+Worker generates content → uploads via client.yield.resource() (content over HTTP)
     ↓
-Worker emits yield:progress, yield:finished via /bus/emit
+Backend persists content, emits yield:create → Stower appends yield:created
     ↓
-Worker also emits mark:update-body → EventBus → Stower persists → mark:body-updated
+Worker emits job:report-progress, then job:complete (job:fail on error)
+on the unified job channels — client filters by jobId
+    ↓
+Stower auto-binds the source reference (sourceAnnotationId): emits mark:update-body
+→ Stower persists → mark:body-updated
     ↓
 Every connected frontend receives the enriched mark:body-updated on /bus/subscribe
     ↓
@@ -160,22 +166,27 @@ Generation has no dedicated REST endpoint — it runs as a bus job. The SDK's `y
 
 **Dispatch**: [packages/sdk/src/namespaces/yield.ts](../../../packages/sdk/src/namespaces/yield.ts) → `job:create`, handled by [job-commands.ts](../../../packages/make-meaning/src/handlers/job-commands.ts)
 
-**Generation params** (carried on the `job:create` event):
+**Generation params** — the SDK's `yield` namespace maps `GenerationOptions`
+([packages/sdk/src/namespaces/types.ts](../../../packages/sdk/src/namespaces/types.ts)) into the `job:create` event's
+`params`, alongside the top-level `jobType: 'generation'` and the source
+`resourceId`:
 ```typescript
 {
-  referenceId: string;      // Annotation ID to generate from
-  title?: string;           // Optional custom title
-  language?: string;        // Content language (default: 'en')
-  tone?: 'scholarly' | 'explanatory' | 'conversational' | 'technical';
-  length?: 'brief' | 'moderate' | 'detailed';
-  maxTokens?: number;       // Max LLM response tokens
-  entityTypes?: string[];   // Stamped on the synthesized resource AND
-                            // injected into the LLM prompt as a topical
-                            // bias. The dispatcher passes them through to
-                            // the worker; the worker forwards them to
-                            // `client.yield.resource(...)` so the
-                            // synthesized resource lands with the same
-                            // entity-type set the caller intended.
+  referenceId: string;        // fromAnnotation only — the annotation being resolved
+  title: string;              // Title of the synthesized resource; also the LLM topic
+  storageUri: string;         // Where the generated content is written (file://…)
+  context: GatheredContext;   // Correlated context from the Gather flow (grounds the prompt)
+  prompt?: string;            // Freeform user instructions, injected as "Additional context: …"
+  entityTypes?: string[];     // Stamped on the synthesized resource AND injected into the
+                              // prompt as a topical bias ("Focus on these entity types: …"),
+                              // so `browse.resources({ entityType: … })` can later find it
+  language?: string;          // Body locale — the language the resource is written in
+  sourceLanguage?: string;    // Source locale — language of the referenced content, named in
+                              // the prompt so the LLM reads the embedded source snippets (BCP-47)
+  temperature?: number;       // LLM sampling temperature (worker default 0.7)
+  maxTokens?: number;         // Target LLM response length in tokens (worker default 500)
+  outputMediaType?: SupportedMediaType; // Output format; the worker defaults to text/markdown
+                              // and fails the job for anything outside text/markdown | text/plain
 }
 ```
 
@@ -184,7 +195,7 @@ Generation has no dedicated REST endpoint — it runs as a bus job. The SDK's `y
 2. Create a generation job and submit it to the queue (`job:create` → `job:created`)
 3. Surface progress to the client over SSE via the unified job channels
 
-**Progress events**: generation reports on `job:report-progress` (ephemeral) and finishes with `job:complete` / `job:fail`, scoped to the resource. The job keeps running even if the client disconnects.
+**Progress events**: generation reports on `job:report-progress` (ephemeral) and finishes with `job:complete` / `job:fail`. These are global, `jobId`-keyed signals (the dispatcher filters by `jobId`; resource viewers filter the same global stream by `resourceId`) — not resource-scoped delivery. The job keeps running even if the client disconnects.
 
 ### Generation Worker
 
@@ -202,18 +213,19 @@ Generation runs as a job processor in [@semiont/jobs](../../../packages/jobs/) �
 
 2. **Generate Content (40-70%)**
    - Build generation prompt with reference text and context
-   - Apply user parameters (tone, length, language)
+   - Apply user parameters (prompt, entity types, language, source language, temperature, max tokens)
    - Call AI inference using `generateResourceFromTopic()`
    - Parse and validate generated content
 
 3. **Create Resource (85%)**
-   - Store content in Content Store
-   - Emit `yield:create` on EventBus → Stower persists to Event Store
-   - Generate resource ID from content checksum
+   - Upload content via `client.yield.resource()` (HTTP multipart — content is not bus traffic)
+   - Backend persists content and emits `yield:create` → Stower appends `yield:created`
+   - Worker receives the new resource ID from the upload response
 
-4. **Link Reference (95%)**
-   - Build SpecificResource body linking to new resource
-   - Emit `mark:update-body` on EventBus → Stower persists to Event Store
+4. **Link Source Reference (95%)**
+   - Annotation-focus: the upload's `sourceAnnotationId` drives the Stower's auto-bind,
+     which emits `mark:update-body` → `mark:body-updated`
+   - Resource-focus: the worker emits `mark:create` to mint a source→derived provenance reference
    - Domain event broadcasts to SSE subscribers (document viewers)
 
 5. **Complete (100%)**
@@ -227,88 +239,113 @@ See [Job Workers Documentation](../../../packages/make-meaning/docs/job-workers.
 
 The generation prompt is enriched with graph context from the [Gather flow](./GATHER.md) when available. This includes connected resources, citations, and an optional LLM-generated relationship summary.
 
-**Prompt Structure**:
+**Prompt Structure** (assembled by `generateResourceFromTopic`; every section
+below is omitted when its underlying data is absent):
 ```
-You are generating content for a reference to "{referenceText}" in a document.
+Generate a concise, informative resource about "{title}".
+Focus on these entity types: {comma-separated entity types}.        // when entityTypes is non-empty
+Additional context: {prompt}                                        // when a freeform prompt was supplied
 
-Context from source document:
-{surrounding text from source document}
+Annotation context:                                                 // annotation-focus (fromAnnotation)
+- Annotation motivation: {motivation}
+- Source resource: {source resource name}
+- Comment|Assessment: {body text}                                   // commenting/assessing annotations only
 
-Entity types: {comma-separated entity type tags}
+Source document context:                                            // annotation-focus, when a passage is selected
+---
+...{before} **[{selected text}]** {after}...
+---
 
-Knowledge graph context:
-- Connected resources: {names of connected resources}
-- Cited by: {names of citing resources}
-- Related entity types: {sibling entity types from graph neighborhood}
-- Relationship summary: {inferredRelationshipSummary, if available}
+Resource context:                                                   // resource-focus (fromResource)
+- Resource: {resource name}
+- Summary: {summary}
+- Suggested references: {…}
+{capped focal + related resource content}
 
-Generate {length} content in a {tone} tone about "{referenceText}".
+Knowledge graph context:                                            // shared, from the gathered graph
+- Connected resources: {name (entity types), …}
+- This resource is cited by {N} other resources: {names}
+- Related entity types in this document: {sibling entity types}
+- Relationship summary: {inferredRelationshipSummary}
 
-The generated content should:
-- Be factually accurate and informative
-- Match the requested tone and length
-- Provide relevant context and background
-- Be written in {language}
+Related passages from the knowledge base:                           // shared, top-3 semantic matches
+- ({score}) {passage text}
 
-Generate the content as plain text (no markdown formatting).
+The source resource and embedded context are in {source language}.  // when sourceLanguage is set
+IMPORTANT: Write the entire resource in {language}.                 // when language is not English
+
+Requirements:
+- Aim for approximately {maxTokens} tokens of content, organized into well-structured paragraphs
+- Be factual and informative
+- Start with a clear heading (# Title)                              // markdown (default output)
+- Use markdown formatting
+- Write the response as markdown
 ```
 
-The graph context section is omitted when no graph context is available (e.g., for isolated annotations with no graph connections).
+There is no tone or length parameter. Generation is steered by the freeform
+`prompt`, the `entityTypes` bias, and the gathered context; the requested
+`maxTokens` sets the target length (and, for markdown output ≥1000 tokens, the
+prompt also asks for titled `## Section`s). When `outputMediaType` is
+`text/plain` the format requirements instead tell the model to emit plain text
+with the title on its own first line. Each context section is omitted when its
+data is absent — e.g. the graph section disappears for an isolated annotation
+with no connections.
 
 **Model Parameters**:
 - Model: Claude Sonnet 4.5
-- Temperature: 0.4 (balanced between accuracy and creativity)
-- Max tokens: Configurable (default 500 for brief, 1500 for moderate, 3000 for detailed)
-
-**Tone Guidelines**:
-- **Scholarly**: Academic style, formal language, citation-oriented
-- **Explanatory**: Educational, clear explanations for general audience
-- **Conversational**: Casual, friendly, approachable
-- **Technical**: Precise, detailed, expert-level terminology
-
-**Length Guidelines**:
-- **Brief**: ~100-200 words, concise overview
-- **Moderate**: ~300-500 words, balanced coverage
-- **Detailed**: ~800-1200 words, comprehensive treatment
+- Temperature: caller-supplied `temperature`; worker default 0.7
+- Max tokens: caller-supplied `maxTokens`; worker default 500 (no preset tiers)
 
 ### Event Emission
 
-The GenerationWorker emits events on the EventBus. The Stower subscribes to these and persists them to the Event Store.
+The generation worker does **not** emit `yield:create` on the bus — content
+never travels on the bus. The worker uploads the synthesized content over HTTP
+via `client.yield.resource()` (the same multipart path the compose page uses);
+the backend writes the bytes to disk and emits `yield:create`, which the Stower
+persists. A second event — the reference auto-bind — is then emitted by the
+**Stower**, not by the worker.
 
-**Resource Creation** — worker emits `yield:create` on EventBus:
+**Resource creation** — the worker uploads; the backend emits `yield:create`.
+In [packages/jobs/src/worker-process.ts](../../../packages/jobs/src/worker-process.ts) the worker calls (content over HTTP,
+not the bus; `sourceAnnotationId` is what later drives the auto-bind):
 ```typescript
-eventBus.get('yield:create').next({
-  name: generatedTitle,
-  content: contentBuffer,
-  format: 'text/plain',
-  language: language,
-  creationMethod: 'generated',
-  userId,
+const { resourceId: newResourceId } = await session.client.yield.resource({
+  name: genResult.title,
+  file: Buffer.from(genResult.content),
+  format: genResult.format,          // requested output media type; defaults to text/markdown
+  storageUri,
+  sourceResourceId,
+  sourceAnnotationId: referenceId,   // annotation-focus only — omitted for fromResource
+  generationPrompt, language, entityTypes, generator,
 });
 ```
+The backend persists the content and emits `yield:create` → Stower appends `yield:created`.
 
-**Annotation Update** — worker emits `mark:update-body` on EventBus:
+**Reference resolution (auto-bind)** — the Stower's `yield:create` handler, *not*
+the worker, resolves the source reference. When the upload carried
+`sourceAnnotationId`/`sourceResourceId` (persisted as `generatedFrom`), the Stower
+emits `mark:update-body` to add the new resource as a linking body
+([packages/make-meaning/src/stower.ts](../../../packages/make-meaning/src/stower.ts)):
 ```typescript
-eventBus.get('mark:update-body').next({
-  annotationId: referenceId,
-  resourceId: sourceResourceId,
+this.eventBus.get('mark:update-body').next({
+  annotationId: generatedFrom.annotationId,   // the source reference
+  resourceId: generatedFrom.resourceId,       // the source resource
   operations: [{
     op: 'add',
-    item: {
-      type: 'SpecificResource',
-      source: newResourceId,
-      purpose: 'linking'
-    }
-  }]
+    item: { type: 'SpecificResource', source: rId, purpose: 'linking' },
+  }],
 });
 ```
+Resource-focus generation (`fromResource`, no triggering reference) has nothing to
+auto-bind; instead the worker emits `mark:create` to mint a navigable
+source→derived provenance reference annotation.
 
-**Why Two Events?**
-- `yield:create` → Stower persists → `yield:created`: Creates the new generated resource
-- `mark:update-body` → Stower persists → `mark:body-updated`: Updates the reference in source document
+**Why two events?**
+- `yield:create` (backend, after the HTTP upload) → Stower persists → `yield:created`: creates the new generated resource
+- `mark:update-body` (Stower auto-bind) → Stower persists → `mark:body-updated`: resolves the source reference in the original document
 
 Both events flow through EventBus → Stower → Event Store → Materialized Views → Graph Database, enabling:
-- Source document viewer sees reference resolve in real-time
+- Source document viewer sees the reference resolve in real-time
 - New resource is immediately queryable and browsable
 - Graph database tracks relationship: (Source)-[:HAS_ANNOTATION]->(Reference)-[:LINKS_TO]->(Generated)
 
@@ -316,20 +353,33 @@ Both events flow through EventBus → Stower → Event Store → Materialized Vi
 
 ### Generation UI
 
-**Component**: [packages/react-ui/src/components/resource/panels/ReferencesPanel.tsx](../../../packages/react-ui/src/components/resource/panels/ReferencesPanel.tsx)
+**Components**:
+- [ReferenceWizardModal.tsx](../../../packages/react-ui/src/components/modals/ReferenceWizardModal.tsx) — wizard for resolving an unresolved reference annotation (drives `yield.fromAnnotation`)
+- [ConfigureGenerationStep.tsx](../../../packages/react-ui/src/components/modals/ConfigureGenerationStep.tsx) — generation config form, shared with the resource-derived flow
 
-**UI Elements**:
-- Reference annotations display with ❓ icon for unresolved references
-- "Generate" button triggers generation modal
-- Generation modal shows:
-  - Reference text preview
-  - Entity type tags
-  - Knowledge graph context (connected resources, cited-by with counts, sibling entity types)
-  - Optional title input
-  - Tone selector (scholarly/explanatory/conversational/technical)
-  - Length selector (brief/moderate/detailed)
-  - Language selector
-  - Advanced options (max tokens override)
+Resolving an unresolved reference (❓) opens `ReferenceWizardModal`. It first
+gathers correlated context (see [Gather flow](./GATHER.md) — the gather step
+renders the reference text, entity-type tags, and knowledge-graph context),
+then offers three resolution strategies:
+
+- **Bind** — search existing resources and link to a match (Match flow)
+- **Generate** — synthesize a new resource with AI (this flow)
+- **Compose** — author the resource by hand
+
+Choosing **Generate** advances to `ConfigureGenerationStep`, whose controls map
+directly onto `GenerationOptions`:
+
+- **Resource title** (text, required) → `title`
+- **Save location** (`file://` path, required) → `storageUri`
+- **Additional instructions** (textarea, optional) → `prompt`
+- **Language** (locale select) → `language`
+- **Creativity** (slider 0–1, default 0.7) → `temperature`
+- **Max length** (number 100–4000, default 500) → `maxTokens`
+
+There is no tone or length control — steering is the freeform **Additional
+instructions** prompt plus the entity-type tags carried on the annotation. The
+resource-derived variant ([ResourceGenerateModal.tsx](../../../packages/react-ui/src/components/modals/ResourceGenerateModal.tsx), driving
+`yield.fromResource`) reuses the same `ConfigureGenerationStep`.
 
 **Progress Display**:
 - Modal shows real-time progress during generation
@@ -345,32 +395,35 @@ Both events flow through EventBus → Stower → Event Store → Materialized Vi
 
 **File**: [packages/sdk/src/namespaces/yield.ts](../../../packages/sdk/src/namespaces/yield.ts)
 
-`yield.fromAnnotation()` returns an Observable of progress events,
+`yield.fromAnnotation()` returns an Observable of `YieldGenerationEvent`s,
 backed by the bus gateway. The namespace emits `job:create` (jobType:
-`generation`) via `/bus/emit`; the Yield worker picks it up, generates
-the resource, and publishes `yield:progress` / `yield:finished` /
-`yield:failed` events as it works.
+`generation`) via `/bus/emit`; the generation worker picks it up,
+generates the resource, and publishes the unified
+`job:report-progress` / `job:complete` / `job:fail` lifecycle as it
+works. The namespace filters those by the `jobId` returned from
+`job:create` and re-emits them as discriminated
+`{ kind: 'progress' }` / `{ kind: 'complete' }` events (failure
+surfaces as the Observable's error).
 
 ```typescript
 const subscription = client.yield.fromAnnotation(resourceId, referenceId, {
   title: 'Ouranos',
   storageUri: 'file://...',
   context,
-  tone: 'scholarly',
   language: 'en',
 }).subscribe({
-  next: (progress) => {
-    setYieldProgress({
-      status: progress.status,
-      percentage: progress.percentage,
-      message: progress.message,
-    });
+  next: (event) => {
+    if (event.kind === 'progress') {
+      // event.data is a JobProgress
+      setYieldProgress(event.data);
+    }
+    // event.kind === 'complete' carries the final JobCompleteCommand
   },
   complete: () => {
     toast.success('Resource generated successfully');
-    // The worker also emits mark:body-updated on the bus;
-    // BrowseNamespace updates the cached annotation in place,
-    // UI flips ❓ → 🔗 automatically.
+    // The Stower auto-binds the source reference, broadcasting
+    // mark:body-updated on the bus; BrowseNamespace updates the cached
+    // annotation in place, UI flips ❓ → 🔗 automatically.
   },
   error: (err) => {
     toast.error(err.message);
@@ -385,16 +438,19 @@ subscription.unsubscribe();  // cleanup
 
 **Single bus connection delivers everything**:
 
-Progress events (`yield:progress`, `yield:finished`) and domain events
-(`mark:body-updated`) all flow through the same `/bus/subscribe` SSE
-connection. The frontend's `YieldStateUnit` filters progress events by
-correlationId for the modal UI, while `BrowseNamespace` handles the
-domain event for cache invalidation.
+Job lifecycle events (`job:report-progress`, `job:complete`,
+`job:fail`) and domain events (`mark:body-updated`) all flow through
+the same `/bus/subscribe` SSE connection. The frontend's
+`YieldStateUnit` observes the `yield.fromAnnotation()` stream — which
+filters lifecycle events by the generation's `jobId` — for the modal
+UI, while `BrowseNamespace` handles the domain event for cache
+invalidation.
 
 **No Page Refresh Required**
 
 The `mark:body-updated` event flow:
-1. Worker emits `mark:update-body` → EventBus → Stower persists →
+1. Stower's `yield:create` handler auto-binds the source reference, emitting
+   `mark:update-body` → EventBus → Stower persists →
    EventStore publishes enriched `mark:body-updated` on scoped bus
 2. Frontend ActorStateUnit receives event, bridges to local EventBus
 3. `BrowseNamespace.updateAnnotationInPlace` writes the enriched
@@ -439,7 +495,7 @@ See [EVENT-BUS.md](../EVENT-BUS.md) for the bus protocol.
 4. Progress updates appear in real-time
 5. Reference icon changes ❓ → 🔗 without page refresh
 6. Click 🔗 → navigate to generated resource
-7. Verify generated content is relevant and matches tone/length
+7. Verify generated content is relevant to the reference and reflects the title, prompt, and entity types
 
 **Error Scenarios**:
 - Invalid reference ID → 404 error, no job created
@@ -477,7 +533,8 @@ See [EVENT-BUS.md](../EVENT-BUS.md) for the bus protocol.
 
 ### Frontend
 
-- [packages/react-ui/src/components/resource/panels/ReferencesPanel.tsx](../../../packages/react-ui/src/components/resource/panels/ReferencesPanel.tsx) - Generation UI
+- [packages/react-ui/src/components/modals/ReferenceWizardModal.tsx](../../../packages/react-ui/src/components/modals/ReferenceWizardModal.tsx) - Reference-resolution wizard (Bind / Generate / Compose)
+- [packages/react-ui/src/components/modals/ConfigureGenerationStep.tsx](../../../packages/react-ui/src/components/modals/ConfigureGenerationStep.tsx) - Generation config form (title, prompt, language, creativity, max length)
 - [packages/sdk/src/state/flows/yield-state-unit.ts](../../../packages/sdk/src/state/flows/yield-state-unit.ts) - Generation flow state unit (bus commands + progress)
 - [packages/http-transport/src/transport/actor-state-unit.ts](../../../packages/http-transport/src/transport/actor-state-unit.ts) - Bus actor primitive
 

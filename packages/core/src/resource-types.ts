@@ -13,4 +13,5 @@ export interface ResourceFilter {
   search?: string;
   limit?: number;
   offset?: number;
+  archived?: boolean;
 }

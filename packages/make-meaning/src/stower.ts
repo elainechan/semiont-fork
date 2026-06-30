@@ -140,27 +140,10 @@ export class Stower {
         },
       });
 
-      const resource: ResourceDescriptor = {
-        '@context': 'https://schema.org/' as const,
-        '@id': rId,
-        name: event.name,
-        archived: false,
-        entityTypes: event.entityTypes || [],
-        storageUri: event.storageUri,
-        currentChecksum: checksum,
-        dateCreated: new Date().toISOString(),
-        representations: [
-          {
-            mediaType: event.format,
-            checksum,
-            byteSize,
-            rel: 'original' as const,
-            language: event.language,
-          },
-        ],
-      };
-
-      this.eventBus.get('yield:create-ok').next({ resourceId: rId, resource });
+      this.eventBus.get('yield:create-ok').next({
+        correlationId: event.correlationId,
+        response: { resourceId: rId },
+      });
 
       // Auto-bind: when a resource is generated from a reference annotation,
       // resolve the source reference by adding the new resource as a linking
@@ -194,6 +177,7 @@ export class Stower {
     } catch (error) {
       this.logger.error('Failed to create resource', { error: errField(error) });
       this.eventBus.get('yield:create-failed').next({
+        correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -217,11 +201,14 @@ export class Stower {
           contentByteSize: event.byteSize,
         },
       });
-      this.eventBus.get('yield:update-ok').next({ resourceId: event.resourceId });
+      this.eventBus.get('yield:update-ok').next({
+        correlationId: event.correlationId,
+        response: { resourceId: event.resourceId },
+      });
     } catch (error) {
       this.logger.error('Failed to update resource', { error: errField(error) });
       this.eventBus.get('yield:update-failed').next({
-        resourceId: event.resourceId,
+        correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -256,7 +243,6 @@ export class Stower {
           toUri: event.toUri,
         },
       });
-      this.eventBus.get('yield:move-ok').next({ resourceId: rId });
     } catch (error) {
       this.logger.error('Failed to move resource', { error: errField(error) });
       this.eventBus.get('yield:move-failed').next({
@@ -308,10 +294,11 @@ export class Stower {
         version: 1,
         payload: { annotationId: annotationId(event.annotationId) },
       });
-      this.eventBus.get('mark:delete-ok').next({ annotationId: event.annotationId });
+      this.eventBus.get('mark:delete-ok').next({ correlationId: event.correlationId, response: { annotationId: event.annotationId } });
     } catch (error) {
       this.logger.error('Failed to delete annotation', { error: errField(error) });
       this.eventBus.get('mark:delete-failed').next({
+        correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -348,39 +335,60 @@ export class Stower {
     if (!event._userId) {
       throw new Error('mark:archive missing _userId (gateway injection)');
     }
-    if (event.storageUri) {
-      await this.kb.content.remove(event.storageUri, { keepFile: event.keepFile, noGit: event.noGit });
+    try {
+      if (event.storageUri) {
+        await this.kb.content.remove(event.storageUri, { keepFile: event.keepFile, noGit: event.noGit });
+      }
+      await this.kb.eventStore.appendEvent({
+        type: 'mark:archived',
+        resourceId: resourceId(event.resourceId),
+        userId: makeUserId(event._userId),
+        version: 1,
+        payload: { reason: undefined },
+      });
+      // Correlation-keyed ack for the SDK's busRequest (the persisted
+      // mark:archived domain event remains the system-of-record signal).
+      this.eventBus.get('mark:archive-ok').next({ correlationId: event.correlationId });
+    } catch (error) {
+      this.logger.error('Failed to archive resource', { error: errField(error) });
+      this.eventBus.get('mark:archive-failed').next({
+        correlationId: event.correlationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
-    await this.kb.eventStore.appendEvent({
-      type: 'mark:archived',
-      resourceId: resourceId(event.resourceId),
-      userId: makeUserId(event._userId),
-      version: 1,
-      payload: { reason: undefined },
-    });
   }
 
   private async handleMarkUnarchive(event: EventMap['mark:unarchive']): Promise<void> {
     if (!event._userId) {
       throw new Error('mark:unarchive missing _userId (gateway injection)');
     }
-    // If storageUri is provided, verify the file exists before emitting the event
-    if (event.storageUri) {
-      const absPath = this.kb.content.resolveUri(event.storageUri);
-      try {
-        await fs.access(absPath);
-      } catch {
-        this.logger.warn('Unarchive failed: file not found at storageUri', { storageUri: event.storageUri });
-        return;
+    try {
+      // If storageUri is provided, verify the file exists before emitting the event.
+      if (event.storageUri) {
+        const absPath = this.kb.content.resolveUri(event.storageUri);
+        try {
+          await fs.access(absPath);
+        } catch {
+          // Was a silent `return` — a missing file now surfaces as a real
+          // failure the caller can observe, not a successful-looking no-op.
+          throw new Error(`Cannot unarchive: file not found at ${event.storageUri}`);
+        }
       }
+      await this.kb.eventStore.appendEvent({
+        type: 'mark:unarchived',
+        resourceId: resourceId(event.resourceId),
+        userId: makeUserId(event._userId),
+        version: 1,
+        payload: {},
+      });
+      this.eventBus.get('mark:unarchive-ok').next({ correlationId: event.correlationId });
+    } catch (error) {
+      this.logger.error('Failed to unarchive resource', { error: errField(error) });
+      this.eventBus.get('mark:unarchive-failed').next({
+        correlationId: event.correlationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
-    await this.kb.eventStore.appendEvent({
-      type: 'mark:unarchived',
-      resourceId: resourceId(event.resourceId),
-      userId: makeUserId(event._userId),
-      version: 1,
-      payload: {},
-    });
   }
 
   private async handleAddEntityType(event: EventMap['frame:add-entity-type']): Promise<void> {
@@ -394,10 +402,15 @@ export class Stower {
         version: 1,
         payload: { entityType: event.tag },
       });
-      // No manual .next() needed — appendEvent publishes StoredEvent on the Core EventBus
+      // appendEvent publishes the `frame:entity-type-added` domain event (the
+      // in-process callers' success signal). `*-add-ok` is the correlation-keyed
+      // ack the SDK's busRequest awaits (undefined correlationId for in-process
+      // emits, which don't await it).
+      this.eventBus.get('frame:entity-type-add-ok').next({ correlationId: event.correlationId });
     } catch (error) {
       this.logger.error('Failed to add entity type', { error: errField(error) });
       this.eventBus.get('frame:entity-type-add-failed').next({
+        correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -414,10 +427,13 @@ export class Stower {
         version: 1,
         payload: { schema: event.schema },
       });
-      // No manual .next() needed — appendEvent publishes StoredEvent on the Core EventBus
+      // See handleAddEntityType: the domain event is the in-process callers'
+      // success signal; `*-add-ok` is the correlation-keyed ack for the SDK's busRequest.
+      this.eventBus.get('frame:tag-schema-add-ok').next({ correlationId: event.correlationId });
     } catch (error) {
       this.logger.error('Failed to add tag schema', { schemaId: event.schema?.id, error: errField(error) });
       this.eventBus.get('frame:tag-schema-add-failed').next({
+        correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });
     }

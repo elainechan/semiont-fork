@@ -3,6 +3,10 @@
 
 import { GraphDatabase } from '../interface';
 import type { Logger } from '@semiont/core';
+import * as fs from 'fs/promises';
+import { createReadStream } from 'fs';
+import * as readline from 'readline';
+import * as path from 'path';
 import type {
   AnnotationCategory,
   GraphConnection,
@@ -78,15 +82,17 @@ export class MemoryGraphDatabase implements GraphDatabase {
   }
 
   async updateResource(id: ResourceId, input: UpdateResourceInput): Promise<ResourceDescriptor> {
-    // Resources are immutable - only archiving is allowed
-    if (Object.keys(input).length !== 1 || input.archived === undefined) {
-      throw new Error('Resources are immutable. Only archiving is allowed.');
+    const allowedKeys = new Set(['archived', 'entityTypes']);
+    const inputKeys = Object.keys(input);
+    if (inputKeys.some(k => !allowedKeys.has(k))) {
+      throw new Error('Resources are immutable. Only archiving and entityTypes are allowed.');
     }
 
     const doc = this.resources.get(String(id));
     if (!doc) throw new Error('Resource not found');
 
-    doc.archived = input.archived;
+    if (input.archived !== undefined) doc.archived = input.archived;
+    if (input.entityTypes !== undefined) doc.entityTypes = input.entityTypes;
     return doc;
   }
 
@@ -118,6 +124,16 @@ export class MemoryGraphDatabase implements GraphDatabase {
         (doc.storageUri?.toLowerCase().includes(searchLower) ?? false)
       );
     }
+
+    if (filter.archived !== undefined) {
+      docs = docs.filter(doc => (doc.archived ?? false) === filter.archived);
+    }
+
+    docs.sort((a, b) => {
+      const aT = a.dateCreated ? new Date(a.dateCreated).getTime() : 0;
+      const bT = b.dateCreated ? new Date(b.dateCreated).getTime() : 0;
+      return bT - aT;
+    });
 
     const total = docs.length;
     const offset = filter.offset || 0;
@@ -485,5 +501,93 @@ export class MemoryGraphDatabase implements GraphDatabase {
     this.resources.clear();
     this.annotations.clear();
     this.entityTypesCollection = null;
+  }
+
+  async saveSnapshot(filePath: string): Promise<void> {
+    const tmp = filePath + '.tmp';
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+    // JSONL format: one JSON object per line to avoid V8 string length limit.
+    // Line 0: header with metadata
+    // Lines 1..N: resources (type: 'r')
+    // Lines N+1..M: annotations (type: 'a')
+    // Lines M+1..P: entityTypes (type: 'e')
+    const handle = await fs.open(tmp, 'w');
+    try {
+      const write = (obj: unknown) => handle.write(JSON.stringify(obj) + '\n');
+      await write({ type: 'h', snapshotTime: new Date().toISOString() });
+      for (const [k, v] of this.resources) await write({ type: 'r', k, v });
+      for (const [k, v] of this.annotations) await write({ type: 'a', k, v });
+      if (this.entityTypesCollection) {
+        for (const t of this.entityTypesCollection) await write({ type: 'e', t });
+      }
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(tmp, filePath);
+    this.logger?.info('Graph snapshot saved', {
+      resources: this.resources.size,
+      annotations: this.annotations.size,
+      path: filePath,
+    });
+  }
+
+  async loadSnapshot(filePath: string): Promise<Date | null> {
+    try {
+      await fs.access(filePath);
+    } catch {
+      return null;
+    }
+    try {
+      const rl = readline.createInterface({
+        input: createReadStream(filePath, { encoding: 'utf8' }),
+        crlfDelay: Infinity,
+      });
+
+      let snapshotTime: Date | null = null;
+      const resources = new Map<string, ResourceDescriptor>();
+      const annotations = new Map<string, Annotation>();
+      const entityTypes = new Set<string>();
+      let firstLine = true;
+
+      await new Promise<void>((resolve, reject) => {
+        rl.on('line', (line) => {
+          if (!line.trim()) return;
+          try {
+            const row = JSON.parse(line) as
+              | { type: 'h'; snapshotTime: string }
+              | { type: 'r'; k: string; v: ResourceDescriptor }
+              | { type: 'a'; k: string; v: Annotation }
+              | { type: 'e'; t: string };
+            if (firstLine) {
+              firstLine = false;
+              if (row.type !== 'h') { rl.close(); reject(new Error('bad header')); return; }
+              snapshotTime = new Date((row as { type: 'h'; snapshotTime: string }).snapshotTime);
+              return;
+            }
+            if (row.type === 'r') resources.set(row.k, row.v);
+            else if (row.type === 'a') annotations.set(row.k, row.v);
+            else if (row.type === 'e') entityTypes.add(row.t);
+          } catch { /* skip malformed line */ }
+        });
+        rl.on('close', resolve);
+        rl.on('error', reject);
+      });
+
+      // TypeScript can't track closure mutations; cast after null guard.
+      if (!snapshotTime) return null;
+      const loadedTime = snapshotTime as Date;
+      this.resources = resources;
+      this.annotations = annotations;
+      this.entityTypesCollection = entityTypes.size > 0 ? entityTypes : null;
+      this.logger?.info('Graph snapshot loaded', {
+        resources: this.resources.size,
+        annotations: this.annotations.size,
+        snapshotTime: loadedTime.toISOString(),
+      });
+      return loadedTime;
+    } catch {
+      return null;
+    }
   }
 }

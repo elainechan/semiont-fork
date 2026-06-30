@@ -410,4 +410,114 @@ describe('Browser actor', () => {
       expect(result.message).toBe('Resource lookup failed');
     });
   });
+
+  // ── browse:resources-page-requested ───────────────────────────────────────
+
+  describe('browse:resources-page-requested', () => {
+    let mockListResources: ReturnType<typeof vi.fn>;
+
+    const makeResource = (id: string, name: string, dateCreated: string) => ({
+      '@id': id,
+      name,
+      dateCreated,
+      archived: false,
+      entityTypes: [],
+    });
+
+    function resultPromise() {
+      return new Promise<any>((resolve) => eventBus.get('browse:resources-page-result').subscribe(resolve));
+    }
+    function failedPromise() {
+      return new Promise<any>((resolve) => eventBus.get('browse:resources-page-failed').subscribe(resolve));
+    }
+    function fire(payload: object) {
+      eventBus.get('browse:resources-page-requested').next(payload as any);
+    }
+
+    beforeEach(async () => {
+      await browser.stop();
+      vi.clearAllMocks();
+      mockListResources = vi.fn().mockResolvedValue({ resources: [], total: 0 });
+      const kb = { graph: { listResources: mockListResources } } as any;
+      browser = new Browser(makeViews([]) as any, kb, eventBus, { root: PROJECT_ROOT } as any, mockLogger);
+      await browser.initialize();
+    });
+
+    it('delegates to graph.listResources with offset and limit', async () => {
+      mockListResources.mockResolvedValue({ resources: [], total: 0 });
+      const p = resultPromise();
+      fire({ correlationId: 'r-1', offset: 10, limit: 25 });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ offset: 10, limit: 25 }),
+      );
+    });
+
+    it('applies defaults: offset=0, limit=50', async () => {
+      const p = resultPromise();
+      fire({ correlationId: 'r-2' });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ offset: 0, limit: 50 }),
+      );
+    });
+
+    it('caps limit at 500', async () => {
+      const p = resultPromise();
+      fire({ correlationId: 'r-3', limit: 9999 });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 500 }),
+      );
+    });
+
+    it('passes archived filter to graph', async () => {
+      const p = resultPromise();
+      fire({ correlationId: 'r-4', archived: false });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ archived: false }),
+      );
+    });
+
+    it('wraps single entityType into entityTypes array for graph', async () => {
+      const p = resultPromise();
+      fire({ correlationId: 'r-5', entityType: 'Person' });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ entityTypes: ['Person'] }),
+      );
+    });
+
+    it('passes no entityTypes to graph when entityType is omitted', async () => {
+      const p = resultPromise();
+      fire({ correlationId: 'r-6' });
+      await p;
+      expect(mockListResources).toHaveBeenCalledWith(
+        expect.objectContaining({ entityTypes: undefined }),
+      );
+    });
+
+    it('emits result with resources, total, offset, limit from graph response', async () => {
+      const resources = [makeResource('res:1', 'Alpha', '2026-01-01'), makeResource('res:2', 'Beta', '2026-01-02')];
+      mockListResources.mockResolvedValue({ resources, total: 42 });
+      const p = resultPromise();
+      fire({ correlationId: 'r-7', offset: 0, limit: 10 });
+      const { correlationId, response } = await p;
+      expect(correlationId).toBe('r-7');
+      expect(response.resources).toHaveLength(2);
+      expect(response.total).toBe(42);
+      expect(response.offset).toBe(0);
+      expect(response.limit).toBe(10);
+    });
+
+    it('emits browse:resources-page-failed when graph throws', async () => {
+      mockListResources.mockRejectedValue(new Error('Graph exploded'));
+      const p = failedPromise();
+      fire({ correlationId: 'r-8' });
+      const result = await p;
+      expect(result.correlationId).toBe('r-8');
+      expect(result.message).toBe('Graph exploded');
+    });
+  });
 });

@@ -21,6 +21,7 @@ import type { components } from './types';
 import type { AnnotationId, ResourceId } from './identifiers';
 import type { StoredEvent } from './event-base';
 import type { EventOfType } from './persisted-events';
+import type { ResourceDescriptor } from './graph';
 
 // Branded overrides for OpenAPI command payloads that carry identifier
 // fields. Narrows `string` → branded at the TypeScript layer.
@@ -88,8 +89,7 @@ export type EventMap = {
   'yield:create-ok': components['schemas']['YieldCreateOk'];
   'yield:create-failed': components['schemas']['CommandError'];
   'yield:update-ok': components['schemas']['YieldUpdateOk'];
-  'yield:update-failed': components['schemas']['YieldUpdateOk'] & components['schemas']['CommandError'];
-  'yield:move-ok': components['schemas']['YieldMoveOk'];
+  'yield:update-failed': components['schemas']['CommandError'];
   'yield:move-failed': { fromUri: string } & components['schemas']['CommandError'];
   'yield:clone-token-generated': { correlationId: string; response: components['schemas']['CloneResourceWithTokenResponse'] };
   'yield:clone-token-failed': { correlationId: string } & components['schemas']['CommandError'];
@@ -131,6 +131,13 @@ export type EventMap = {
   'mark:create-failed': components['schemas']['CommandError'];
   'mark:delete-ok': components['schemas']['MarkDeleteOk'];
   'mark:delete-failed': components['schemas']['CommandError'];
+  // archive/unarchive confirmed-write replies (bridged) — correlation-keyed
+  // acks the SDK's busRequest awaits. Failure routes the real outcome back
+  // instead of the old fire-and-forget silence (.plans/bugs/BRIDGE-GAPS.md).
+  'mark:archive-ok': { correlationId?: string };
+  'mark:archive-failed': components['schemas']['CommandError'];
+  'mark:unarchive-ok': { correlationId?: string };
+  'mark:unarchive-failed': components['schemas']['CommandError'];
   'mark:body-update-failed': components['schemas']['CommandError'];
 
   // UI events
@@ -162,8 +169,13 @@ export type EventMap = {
   'frame:add-entity-type': components['schemas']['FrameAddEntityTypeCommand'];
   'frame:add-tag-schema': components['schemas']['FrameAddTagSchemaCommand'];
 
-  // Command results
+  // Command results — `*-add-ok` / `*-add-failed` are correlation-keyed replies
+  // for the SDK's confirmed `busRequest` writes (both bridged). In-process callers
+  // (bootstrap/replay/import) instead race the `frame:*-added` domain event and
+  // don't await `*-add-ok`, so its correlationId is optional.
+  'frame:entity-type-add-ok': { correlationId?: string };
   'frame:entity-type-add-failed': components['schemas']['CommandError'];
+  'frame:tag-schema-add-ok': { correlationId?: string };
   'frame:tag-schema-add-failed': components['schemas']['CommandError'];
 
   // ========================================================================
@@ -200,9 +212,6 @@ export type EventMap = {
 
   // SSE stream payloads
   'gather:annotation-progress': components['schemas']['GatherProgress'];
-  'gather:annotation-finished': components['schemas']['GatherAnnotationFinished'];
-  'gather:progress': components['schemas']['GatherProgress'];
-  'gather:finished': components['schemas']['GatherFinished'];
 
   // ========================================================================
   // BROWSE FLOW — knowledge base reads + UI navigation
@@ -216,6 +225,10 @@ export type EventMap = {
   'browse:resources-requested': components['schemas']['BrowseResourcesRequest'];
   'browse:resources-result': components['schemas']['BrowseResourcesResult'];
   'browse:resources-failed': { correlationId: string } & components['schemas']['CommandError'];
+
+  'browse:resources-page-requested': { correlationId: string; offset?: number; limit?: number; archived?: boolean; entityType?: string; search?: string };
+  'browse:resources-page-result': { correlationId: string; response: { resources: ResourceDescriptor[]; total: number; offset: number; limit: number } };
+  'browse:resources-page-failed': { correlationId: string } & components['schemas']['CommandError'];
 
   'browse:annotations-requested': components['schemas']['BrowseAnnotationsRequest'];
   'browse:annotations-result': components['schemas']['BrowseAnnotationsResult'];
@@ -310,6 +323,11 @@ export type EventMap = {
   'job:create-failed': { correlationId: string } & components['schemas']['CommandError'];
   'job:claimed': { correlationId: string; response: Record<string, unknown> };
   'job:claim-failed': { correlationId: string } & components['schemas']['CommandError'];
+  // cancel-by-type confirmed-write reply: the count of *pending* jobs cancelled
+  // (running jobs finish — there's no worker-kill channel). Failure surfaces a
+  // queue error instead of the old silent swallow (.plans/bugs/BRIDGE-GAPS.md).
+  'job:cancel-ok': { correlationId?: string; response: { cancelled: number } };
+  'job:cancel-failed': components['schemas']['CommandError'];
 
   // ========================================================================
   // SETTINGS (frontend-only)
@@ -344,7 +362,22 @@ export type EventMap = {
   'bus:resume-gap': { scope?: string; lastSeenId?: string; reason: string };
 };
 
-/** Any valid channel name on the EventBus. */
+/**
+ * Any valid channel name on the EventBus — `keyof EventMap`, the root channel
+ * type. Two subsets matter, and confusing them is a silent-failure trap:
+ *
+ * - `EmittableChannel` (below) — channels with a non-null `CHANNEL_SCHEMAS`
+ *   entry; what you EMIT (the `/bus/emit` gateway validates the payload).
+ * - `BridgedChannel` (`bridged-channels.ts`) — the transport fan-in set; the
+ *   only channels a client can SUBSCRIBE to over a concrete transport.
+ *
+ * Request/reply (`busRequest`) emits on an `EmittableChannel` and subscribes on
+ * `BridgedChannel` replies. A reply channel that is a valid `EventName` but NOT
+ * in `BRIDGED_CHANNELS` is never delivered → the request times out with no
+ * compile or runtime error (see
+ * `.plans/bugs/gather-resource-complete-not-bridged.md`). `busRequest` now types
+ * its reply params `BridgedChannel` so that omission is a compile error.
+ */
 export type EventName = keyof EventMap;
 
 /**
@@ -415,8 +448,7 @@ export const CHANNEL_SCHEMAS = {
   'yield:create-ok':                  'YieldCreateOk',
   'yield:create-failed':              'CommandError',
   'yield:update-ok':                  'YieldUpdateOk',
-  'yield:update-failed':              null, // YieldUpdateOk & CommandError
-  'yield:move-ok':                    'YieldMoveOk',
+  'yield:update-failed':              null, // { correlationId } & CommandError
   'yield:move-failed':                null, // { fromUri } & CommandError
   'yield:clone-token-generated':      null, // { correlationId; response: CloneResourceWithTokenResponse }
   'yield:clone-token-failed':         null, // { correlationId } & CommandError
@@ -448,8 +480,14 @@ export const CHANNEL_SCHEMAS = {
   'mark:create-failed':               'CommandError',
   'mark:delete-ok':                   'MarkDeleteOk',
   'mark:delete-failed':               'CommandError',
+  'mark:archive-ok':                  null,
+  'mark:archive-failed':              'CommandError',
+  'mark:unarchive-ok':                null,
+  'mark:unarchive-failed':            'CommandError',
   'mark:body-update-failed':          'CommandError',
+  'frame:entity-type-add-ok':          null,
   'frame:entity-type-add-failed':      'CommandError',
+  'frame:tag-schema-add-ok':           null,
   'frame:tag-schema-add-failed':       'CommandError',
   'mark:select-comment':              'SelectionData',
   'mark:select-tag':                  'SelectionData',
@@ -488,9 +526,6 @@ export const CHANNEL_SCHEMAS = {
   'gather:summary-result':            null, // { correlationId; response: Record<string, unknown> }
   'gather:summary-failed':            null, // { correlationId } & CommandError
   'gather:annotation-progress':       'GatherProgress',
-  'gather:annotation-finished':       'GatherAnnotationFinished',
-  'gather:progress':                  'GatherProgress',
-  'gather:finished':                  'GatherFinished',
 
   // ── BROWSE FLOW ─────────────────────────────────────────────────
   'browse:resource-requested':        'BrowseResourceRequest',
@@ -499,6 +534,9 @@ export const CHANNEL_SCHEMAS = {
   'browse:resources-requested':       'BrowseResourcesRequest',
   'browse:resources-result':          'BrowseResourcesResult',
   'browse:resources-failed':          null,
+  'browse:resources-page-requested':  'BrowseResourcesRequest', // reuses request schema; same fields
+  'browse:resources-page-result':     null,
+  'browse:resources-page-failed':     null,
   'browse:annotations-requested':     'BrowseAnnotationsRequest',
   'browse:annotations-result':        'BrowseAnnotationsResult',
   'browse:annotations-failed':        null,
@@ -566,6 +604,8 @@ export const CHANNEL_SCHEMAS = {
   'job:create-failed':                null,
   'job:claimed':                      null, // { correlationId; response: Record<string, unknown> }
   'job:claim-failed':                 null,
+  'job:cancel-ok':                    null,
+  'job:cancel-failed':                'CommandError',
 
   // ── SETTINGS (frontend-only) ────────────────────────────────────
   'settings:theme-changed':           'SettingsThemeChangedEvent',

@@ -398,6 +398,41 @@ export class EventStorage {
   }
 
   /**
+   * Return resource IDs whose event directory mtime is newer than `since`.
+   * Used by the incremental graph rebuild to skip resources unchanged since snapshot.
+   */
+  async getModifiedResourceIds(since: Date): Promise<ResourceId[]> {
+    const eventsDir = this.project.eventsDir;
+    const modified: ResourceId[] = [];
+
+    try {
+      await fs.access(eventsDir);
+    } catch {
+      return [];
+    }
+
+    const scanDir = async (dir: string) => {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const fullPath = path.join(dir, entry.name);
+        if (entry.name.length > 2) {
+          // Resource directory — check mtime
+          const stat = await fs.stat(fullPath);
+          if (stat.mtime > since) {
+            modified.push(makeResourceId(entry.name));
+          }
+        } else {
+          await scanDir(fullPath);
+        }
+      }
+    };
+
+    await scanDir(eventsDir);
+    return modified;
+  }
+
+  /**
    * Create filename for event file
    */
   private createEventFilename(sequenceNumber: number): string {

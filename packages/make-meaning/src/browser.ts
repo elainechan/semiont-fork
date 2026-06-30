@@ -6,7 +6,8 @@
  *
  * Handles:
  * - browse:resource-requested — single resource metadata (materialized from events)
- * - browse:resources-requested — list resources
+ * - browse:resources-requested — list resources (views-based, always current)
+ * - browse:resources-page-requested — paginated resource list (graph-based, OOM-safe)
  * - browse:annotations-requested — all annotations for a resource
  * - browse:annotation-requested — single annotation with resolved resource
  * - browse:events-requested — resource event history
@@ -19,13 +20,13 @@
 
 import { promises as fs, type Dirent } from 'fs';
 import * as path from 'path';
-import { Subscription, from } from 'rxjs';
-import { mergeMap } from 'rxjs/operators';
+import { Subscription, from, EMPTY } from 'rxjs';
+import { mergeMap, catchError } from 'rxjs/operators';
 import type { SemiontProject } from '@semiont/core/node';
 import type { EventMap, Logger, components } from '@semiont/core';
 import { EventBus, resourceId, annotationId, errField } from '@semiont/core';
 import { withActorSpan } from '@semiont/observability';
-import { getExactText, getTargetSource, getTargetSelector, getResourceEntityTypes, getBodySource } from '@semiont/core';
+import { getExactText, getTargetSource, getTargetSelector, getBodySource } from '@semiont/core';
 import { EventQuery } from '@semiont/event-sourcing';
 import type { ViewStorage } from '@semiont/event-sourcing';
 import type { KnowledgeBase } from './knowledge-base';
@@ -64,13 +65,26 @@ export class Browser {
       handler: (event: EventMap[K]) => Promise<void>,
     ) => this.eventBus.get(name).pipe(
       mergeMap((event) =>
-        from(withActorSpan('browser', name as string, () => handler(event))),
+        from(withActorSpan('browser', name as string, () => handler(event))).pipe(
+          // Isolate per-event failures: a single handler throw must NOT tear down the
+          // channel subscription for every future request — that's the browse:entity-types
+          // wedge (.plans/bugs/browse-entity-types-never-responds.md). Handlers emit their
+          // own *-failed reply; this is the structural backstop for any throw that escapes a
+          // handler's try/catch — the channel survives, the offending request is logged.
+          // (A per-channel *-failed can't be emitted from this generic helper without the
+          // request→failure mapping — that's the Tier 1 operations registry.)
+          catchError((error) => {
+            this.logger.error(`browse handler threw on ${name as string}`, { error: errField(error) });
+            return EMPTY;
+          }),
+        ),
       ),
     );
 
     this.subscriptions.push(
       pipe('browse:resource-requested',          (e) => this.handleBrowseResource(e)).subscribe({ error: errorHandler }),
       pipe('browse:resources-requested',         (e) => this.handleBrowseResources(e)).subscribe({ error: errorHandler }),
+      pipe('browse:resources-page-requested',    (e) => this.handleBrowseResourcesPage(e)).subscribe({ error: errorHandler }),
       pipe('browse:annotations-requested',       (e) => this.handleBrowseAnnotations(e)).subscribe({ error: errorHandler }),
       pipe('browse:annotation-requested',        (e) => this.handleBrowseAnnotation(e)).subscribe({ error: errorHandler }),
       pipe('browse:events-requested',            (e) => this.handleBrowseEvents(e)).subscribe({ error: errorHandler }),
@@ -113,31 +127,23 @@ export class Browser {
 
   private async handleBrowseResources(event: EventMap['browse:resources-requested']): Promise<void> {
     try {
-      let filteredDocs = await ResourceContext.listResources({
-        search: event.search,
-        archived: event.archived,
-      }, this.kb);
-
-      // Filter by entity type
-      if (event.entityType) {
-        filteredDocs = filteredDocs.filter((doc) => getResourceEntityTypes(doc).includes(event.entityType!));
-      }
-
-      // Paginate
       const offset = event.offset ?? 0;
       const limit = event.limit ?? 50;
-      const paginatedDocs = filteredDocs.slice(offset, offset + limit);
 
-      // Add content previews for search results
-      const formattedDocs = event.search
-        ? await ResourceContext.addContentPreviews(paginatedDocs, this.kb)
-        : paginatedDocs;
+      // Route through in-memory graph to avoid O(N) disk reads on 31k+ corpora.
+      const { resources: page, total } = await this.kb.graph.listResources({
+        search: event.search,
+        archived: event.archived,
+        entityTypes: event.entityType ? [event.entityType] : undefined,
+        offset,
+        limit,
+      });
 
       this.eventBus.get('browse:resources-result').next({
         correlationId: event.correlationId,
         response: {
-          resources: formattedDocs,
-          total: filteredDocs.length,
+          resources: page,
+          total,
           offset,
           limit,
         },
@@ -145,6 +151,41 @@ export class Browser {
     } catch (error) {
       this.logger.error('Browse resources failed', { error: errField(error) });
       this.eventBus.get('browse:resources-failed').next({
+        correlationId: event.correlationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async handleBrowseResourcesPage(event: EventMap['browse:resources-page-requested']): Promise<void> {
+    try {
+      const offset = event.offset ?? 0;
+      const limit = Math.min(event.limit ?? 50, 500);
+
+      const { resources: page, total } = await this.kb.graph.listResources({
+        search: event.search,
+        archived: event.archived,
+        entityTypes: event.entityType ? [event.entityType] : undefined,
+        offset,
+        limit,
+      });
+
+      const formattedDocs = event.search
+        ? await ResourceContext.addContentPreviews(page, this.kb)
+        : page;
+
+      this.eventBus.get('browse:resources-page-result').next({
+        correlationId: event.correlationId,
+        response: {
+          resources: formattedDocs,
+          total,
+          offset,
+          limit,
+        },
+      });
+    } catch (error) {
+      this.logger.error('Browse resources page failed', { error: errField(error) });
+      this.eventBus.get('browse:resources-page-failed').next({
         correlationId: event.correlationId,
         message: error instanceof Error ? error.message : String(error),
       });

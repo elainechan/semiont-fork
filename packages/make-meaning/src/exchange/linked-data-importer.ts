@@ -11,10 +11,10 @@
  */
 
 import type { Readable } from 'node:stream';
-import { firstValueFrom, race, timer } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { awaitReply } from './await-reply';
 import type { Logger, ResourceId, UserId } from '@semiont/core';
-import { EventBus, annotationId as annotationIdFactory, resourceId as makeResourceId, baseMediaType, isSupportedMediaType } from '@semiont/core';
+import { EventBus, annotationId as annotationIdFactory, resourceId as makeResourceId, baseMediaType, isSupportedMediaType, busRequest } from '@semiont/core';
+import { asBusRequestPrimitive } from '../bus-request-local';
 import type { components } from '@semiont/core';
 import type { WorkingTreeStore } from '@semiont/content';
 import { deriveStorageUri } from '@semiont/content';
@@ -219,18 +219,12 @@ async function addEntityType(
   eventBus: EventBus,
   logger?: Logger,
 ): Promise<void> {
-  const result$ = race(
-    eventBus.get('frame:entity-type-added').pipe(map(() => 'ok' as const)),
-    eventBus.get('frame:entity-type-add-failed').pipe(map((e) => { throw new Error(e.message); })),
-    timer(IMPORT_TIMEOUT_MS).pipe(map(() => { throw new Error('Timeout waiting for frame:entity-type-added'); })),
+  await busRequest(
+    asBusRequestPrimitive(eventBus),
+    'frame:add-entity-type',
+    { tag: entityType, _userId: userId },
+    IMPORT_TIMEOUT_MS,
   );
-
-  eventBus.get('frame:add-entity-type').next({
-    tag: entityType,
-    _userId: userId,
-  });
-
-  await firstValueFrom(result$);
   logger?.debug('Added entity type', { entityType });
 }
 
@@ -278,26 +272,24 @@ async function importResource(
   const resolvedUri = deriveStorageUri(name, isSupportedMediaType(base) ? base : 'application/octet-stream');
   const stored = await contentStore.store(blob, resolvedUri);
 
-  // Create resource via EventBus
-  const createResult$ = race(
-    eventBus.get('yield:create-ok').pipe(map((r) => r)),
-    eventBus.get('yield:create-failed').pipe(map((e) => { throw new Error(e.message); })),
-    timer(IMPORT_TIMEOUT_MS).pipe(map(() => { throw new Error('Timeout waiting for yield:create-ok'); })),
+  // Create resource via busRequest (correlation-matched in-process write;
+  // throws on failure/timeout).
+  const { resourceId: createdId } = await busRequest(
+    asBusRequestPrimitive(eventBus),
+    'yield:create',
+    {
+      name,
+      storageUri: resolvedUri,
+      contentChecksum: stored.checksum,
+      byteSize: stored.byteSize,
+      format,
+      _userId: userId,
+      language,
+      entityTypes: entityTypes ?? [],
+    },
+    IMPORT_TIMEOUT_MS,
   );
-
-  eventBus.get('yield:create').next({
-    name,
-    storageUri: resolvedUri,
-    contentChecksum: stored.checksum,
-    byteSize: stored.byteSize,
-    format,
-    _userId: userId,
-    language,
-    entityTypes: entityTypes ?? [],
-  });
-
-  const created = await firstValueFrom(createResult$);
-  const resourceId = makeResourceId(created.resourceId);
+  const resourceId = makeResourceId(createdId);
 
   logger?.debug('Created resource from JSON-LD', { name, resourceId });
 
@@ -320,18 +312,17 @@ async function createAnnotation(
   eventBus: EventBus,
   logger?: Logger,
 ): Promise<void> {
-  const result$ = race(
-    eventBus.get('mark:create-ok').pipe(map(() => 'ok' as const)),
-    eventBus.get('mark:create-failed').pipe(map((e) => { throw new Error(e.message); })),
-    timer(IMPORT_TIMEOUT_MS).pipe(map(() => { throw new Error('Timeout waiting for mark:create-ok'); })),
+  await awaitReply(
+    eventBus,
+    'mark:create',
+    {
+      annotation: dehydrateAnnotation(annotation),
+      _userId: userId,
+      resourceId,
+    },
+    'mark:create-ok',
+    'mark:create-failed',
+    IMPORT_TIMEOUT_MS,
   );
-
-  eventBus.get('mark:create').next({
-    annotation: dehydrateAnnotation(annotation),
-    _userId: userId,
-    resourceId,
-  });
-
-  await firstValueFrom(result$);
   logger?.debug('Created annotation', { annotationId: annotation.id });
 }

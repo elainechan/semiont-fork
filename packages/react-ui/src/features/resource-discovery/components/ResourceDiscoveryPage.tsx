@@ -22,6 +22,12 @@ export interface ResourceDiscoveryPageProps {
   isLoadingRecent: boolean;
   isSearching: boolean;
 
+  // Pagination props
+  recentTotal?: number;
+  hasMoreRecent?: boolean;
+  isLoadingMore?: boolean;
+  onLoadMoreRecent?: () => void;
+
   // Controlled search state
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
@@ -58,6 +64,8 @@ export interface ResourceDiscoveryPageProps {
     archived: string;
     created: string;
     loadingKnowledgeBase: string;
+    loadMore?: string;
+    resourceCount?: (n: number) => string;
   };
 
   // Component dependencies
@@ -70,6 +78,10 @@ export function ResourceDiscoveryPage({
   entityTypes,
   isLoadingRecent,
   isSearching,
+  recentTotal,
+  hasMoreRecent,
+  isLoadingMore,
+  onLoadMoreRecent,
   searchQuery,
   onSearchQueryChange,
   selectedEntityType,
@@ -126,6 +138,16 @@ export function ResourceDiscoveryPage({
   }
 
   const showNoResultsWarning = hasSearchQuery && searchDocuments.length === 0 && !isSearching;
+
+  const documentsLabel = hasSearchQuery && searchDocuments.length > 0
+    ? t.searchResults(searchDocuments.length)
+    : selectedEntityType
+      ? t.documentsTaggedWith(selectedEntityType)
+      : t.recentResources;
+
+  const totalLabel = !hasSearchQuery && recentTotal !== undefined && recentTotal > 0 && t.resourceCount
+    ? t.resourceCount(recentTotal)
+    : null;
 
   return (
     <div className={`semiont-page${activePanel && COMMON_PANELS.includes(activePanel as ToolbarPanelType) ? ' semiont-page--panel-open' : ''}`}>
@@ -200,14 +222,16 @@ export function ResourceDiscoveryPage({
 
           {/* Documents Grid */}
           <div className="semiont-card__documents">
-            <h3 className="semiont-card__documents-label">
-              {hasSearchQuery && searchDocuments.length > 0
-                ? t.searchResults(searchDocuments.length)
-                : selectedEntityType
-                  ? t.documentsTaggedWith(selectedEntityType)
-                  : t.recentResources
-              }
-            </h3>
+            <div className="semiont-card__documents-header">
+              <h3 className="semiont-card__documents-label">
+                {documentsLabel}
+              </h3>
+              {totalLabel && (
+                <span className="semiont-card__documents-count" aria-label={totalLabel}>
+                  {totalLabel}
+                </span>
+              )}
+            </div>
 
             {showNoResultsWarning && (
               <div className="semiont-card__warning">
@@ -249,6 +273,19 @@ export function ResourceDiscoveryPage({
                     {t.composeFirstResource}
                   </button>
                 )}
+              </div>
+            )}
+
+            {!hasSearchQuery && hasMoreRecent && onLoadMoreRecent && (
+              <div className="semiont-card__load-more-container">
+                <button
+                  onClick={onLoadMoreRecent}
+                  disabled={isLoadingMore}
+                  className="semiont-card__load-more"
+                  aria-busy={isLoadingMore}
+                >
+                  {isLoadingMore ? t.searching : (t.loadMore ?? 'Load more')}
+                </button>
               </div>
             )}
           </div>

@@ -251,7 +251,10 @@
     "noResultsFound": "No results found for \"{{query}}\". Showing recent resources instead.",
     "noResourcesAvailable": "No resources available. Create your first document to get started.",
     "composeFirstResource": "Compose First Resource",
-    "loadingKnowledgeBase": "Loading knowledge base..."
+    "loadingKnowledgeBase": "Loading knowledge base...",
+    "loadMore": "Load more",
+    "resourceCount": "{{count}} resources",
+    "documentsTaggedWith": "Resources tagged with \"{{entityType}}\""
   },
   "KnowledgeBasePanel": {
     "title": "Knowledge Bases",

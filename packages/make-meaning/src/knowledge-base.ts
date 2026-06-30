@@ -16,10 +16,12 @@
  * via the EventBus gateway, embeds content, and writes to Qdrant directly.
  */
 
+import * as path from 'path';
 import type { EventStore } from '@semiont/event-sourcing';
 import { FilesystemViewStorage, type ViewStorage } from '@semiont/event-sourcing';
 import { WorkingTreeStore } from '@semiont/content';
 import type { GraphDatabase } from '@semiont/graph';
+import { MemoryGraphDatabase } from '@semiont/graph';
 import type { VectorStore } from '@semiont/vectors';
 import type { SemiontProject } from '@semiont/core/node';
 import type { EventBus, Logger } from '@semiont/core';
@@ -64,11 +66,33 @@ export async function createKnowledgeBase(
   if (!options?.skipRebuild) {
     // Rebuild materialized views from the event log first. The Browser actor
     // reads from these views, so they must be populated before any request is
-    // served. The views layer is the third derived read model alongside the
-    // graph and vectors; this call mirrors graphConsumer.rebuildAll() so
-    // that an ephemeral stateDir wipe is recoverable.
+    // served.
     await eventStore.views.rebuildAll(eventStore.log);
-    await graphConsumer.rebuildAll();
+
+    // Graph rebuild — use snapshot if available for fast incremental startup.
+    // Snapshot stores serialized graph state + timestamp of last included event.
+    // On warm boot: load snapshot → replay only resources changed since snapshot → save updated snapshot.
+    // On cold boot (no snapshot): full rebuild → save snapshot for next boot.
+    const snapshotPath = path.join(project.projectionsDir, 'graph-snapshot.json');
+    let snapshotTime: Date | null = null;
+
+    if (graphDb instanceof MemoryGraphDatabase) {
+      snapshotTime = await graphDb.loadSnapshot(snapshotPath);
+    }
+
+    if (snapshotTime) {
+      logger.info('Graph snapshot found — running incremental rebuild', {
+        snapshotTime: snapshotTime.toISOString(),
+      });
+      await graphConsumer.rebuildIncremental(snapshotTime);
+    } else {
+      logger.info('No graph snapshot — running full rebuild');
+      await graphConsumer.rebuildAll();
+    }
+
+    if (graphDb instanceof MemoryGraphDatabase) {
+      await graphDb.saveSnapshot(snapshotPath);
+    }
   }
 
   const kb: KnowledgeBase = {

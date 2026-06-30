@@ -482,6 +482,51 @@ export class GraphDBConsumer {
   }
 
   /**
+   * Replay only resources whose event directories were modified after `snapshotTime`.
+   * Removes stale graph nodes for changed resources, then re-applies their events.
+   * Resources unchanged since the snapshot are left as-is (loaded from snapshot).
+   */
+  async rebuildIncremental(snapshotTime: Date): Promise<void> {
+    const graphDb = this.ensureInitialized();
+
+    const changedIds = await this.eventStore.log.getModifiedResourceIds(snapshotTime);
+    this.logger.info('Incremental rebuild: scanning for changes', {
+      snapshotTime: snapshotTime.toISOString(),
+      changed: changedIds.length,
+    });
+
+    if (changedIds.length === 0) {
+      this.logger.info('Incremental rebuild: no changes since snapshot, skipping replay');
+      return;
+    }
+
+    const query = new EventQuery(this.eventStore.log.storage);
+
+    // PASS 1: nodes for changed resources
+    for (const resourceId of changedIds) {
+      await graphDb.deleteResource(makeResourceId(resourceId as string));
+      const events = await query.getResourceEvents(makeResourceId(resourceId as string));
+      for (const storedEvent of events) {
+        if (storedEvent.type !== 'mark:body-updated') {
+          await this.safeApplyEvent(storedEvent);
+        }
+      }
+    }
+
+    // PASS 2: edges (references) for changed resources
+    for (const resourceId of changedIds) {
+      const events = await query.getResourceEvents(makeResourceId(resourceId as string));
+      for (const storedEvent of events) {
+        if (storedEvent.type === 'mark:body-updated') {
+          await this.safeApplyEvent(storedEvent);
+        }
+      }
+    }
+
+    this.logger.info('Incremental rebuild complete', { rebuilt: changedIds.length });
+  }
+
+  /**
    * Get consumer health metrics.
    */
   getHealthMetrics(): {

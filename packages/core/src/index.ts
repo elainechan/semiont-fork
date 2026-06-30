@@ -225,6 +225,9 @@ export type {
 // Channel set every concrete transport bridges into the client's bus.
 export { BRIDGED_CHANNELS, type BridgedChannel } from './bridged-channels';
 
+// Request/reply over the bus — the transport-neutral primitive (relocated from @semiont/sdk).
+export { busRequest, BusRequestError, type BusRequestErrorCode, type BusRequestPrimitive } from './bus-request';
+
 // Fuzzy text anchoring (annotation re-anchoring under content edits)
 export {
   normalizeText,
@@ -320,6 +323,10 @@ export type { GoogleAuthRequest } from './auth-types';
 
 // ID generation
 export { generateUuid } from './id-generation';
+
+// State-unit pattern — the disposable contract shared by every layer (sdk,
+// http-transport, react-ui, …). The axiom harness lives in `@semiont/core/testing`.
+export type { StateUnit } from './state-unit';
 
 // Utility functions
 export * from './type-guards';

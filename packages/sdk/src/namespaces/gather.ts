@@ -3,7 +3,7 @@ import { filter, map, takeUntil } from 'rxjs/operators';
 import type { AnnotationId, ResourceId, EventBus, GatheredContext } from '@semiont/core';
 import type { ITransport } from '@semiont/core';
 import { StreamObservable } from '../awaitable';
-import { busRequest } from '../bus-request';
+import { busRequest } from '@semiont/core';
 import type { GatherNamespace as IGatherNamespace, GatherAnnotationProgress } from './types';
 
 export class GatherNamespace implements IGatherNamespace {
@@ -86,9 +86,12 @@ export class GatherNamespace implements IGatherNamespace {
       maxResources?: number;
       includeContent?: boolean;
       includeSummary?: boolean;
+      /** Entity types to exclude from the semantic recall built into the context
+       *  (e.g. ['Question'] so prior questions never ground answer generation). */
+      excludeEntityTypes?: string[];
     },
   ): Promise<GatheredContext> {
-    return busRequest<GatheredContext>(
+    return busRequest(
       this.transport,
       'gather:resource-requested',
       {
@@ -98,10 +101,9 @@ export class GatherNamespace implements IGatherNamespace {
           maxResources: options?.maxResources ?? 10,
           includeContent: options?.includeContent ?? true,
           includeSummary: options?.includeSummary ?? false,
+          ...(options?.excludeEntityTypes?.length ? { excludeEntityTypes: options.excludeEntityTypes } : {}),
         },
       },
-      'gather:resource-complete',
-      'gather:resource-failed',
     );
   }
 }

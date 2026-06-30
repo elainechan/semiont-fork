@@ -4,6 +4,7 @@ import { filter, skip, take, toArray } from 'rxjs/operators';
 import type { SemiontClient } from '@semiont/sdk';
 import type { ShellStateUnit } from '../../../../state/shell-state-unit';
 import { createDiscoverStateUnit } from '../discover-state-unit';
+import { assertStateUnitAxioms, disposeProbe } from '@semiont/core/testing';
 
 function mockBrowse(): ShellStateUnit {
   return { dispose: vi.fn() } as unknown as ShellStateUnit;
@@ -14,23 +15,35 @@ interface BrowseFilters {
   archived?: boolean;
   search?: string;
   entityType?: string;
+  offset?: number;
 }
 
+type PageResult = { resources: unknown[]; total: number; offset: number; limit: number };
+
 function mockClient(overrides: {
-  resources$?: BehaviorSubject<unknown[] | undefined>;
+  resourcesPageFn?: (filters: BrowseFilters) => Promise<PageResult>;
   entityTypes$?: BehaviorSubject<string[] | undefined>;
   resourcesFn?: (filters: BrowseFilters) => BehaviorSubject<unknown[] | undefined>;
-} = {}): { client: SemiontClient; resourceCalls: BrowseFilters[] } {
+} = {}): { client: SemiontClient; pagesCalls: BrowseFilters[]; resourceCalls: BrowseFilters[] } {
+  const pagesCalls: BrowseFilters[] = [];
   const resourceCalls: BrowseFilters[] = [];
-  const defaultResources$ =
-    overrides.resources$ ?? new BehaviorSubject<unknown[] | undefined>([{ '@id': 'r1' }]);
+
   const entityTypes$ =
     overrides.entityTypes$ ?? new BehaviorSubject<string[] | undefined>(['Person']);
 
-  const resourcesFn = overrides.resourcesFn ?? (() => defaultResources$);
+  const defaultPageFn: (filters: BrowseFilters) => Promise<PageResult> =
+    (f) => Promise.resolve({ resources: [{ '@id': 'r1' }], total: 1, offset: f.offset ?? 0, limit: f.limit ?? 50 });
+  const resourcesPageFn = overrides.resourcesPageFn ?? defaultPageFn;
+
+  const defaultResourcesFn = () => new BehaviorSubject<unknown[] | undefined>([]);
+  const resourcesFn = overrides.resourcesFn ?? defaultResourcesFn;
 
   const client = {
     browse: {
+      resourcesPage: (filters: BrowseFilters = {}) => {
+        pagesCalls.push(filters);
+        return resourcesPageFn(filters);
+      },
       resources: (filters: BrowseFilters = {}) => {
         resourceCalls.push(filters);
         return resourcesFn(filters).asObservable();
@@ -39,15 +52,15 @@ function mockClient(overrides: {
     },
   } as unknown as SemiontClient;
 
-  return { client, resourceCalls };
+  return { client, pagesCalls, resourceCalls };
 }
 
 describe('createDiscoverStateUnit', () => {
-  it('exposes recent resources from browse namespace', async () => {
+  it('exposes recent resources from resourcesPage on mount', async () => {
     const { client } = mockClient();
     const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
-    const recent = await firstValueFrom(stateUnit.recentResources$);
+    const recent = await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
     expect(recent).toEqual([{ '@id': 'r1' }]);
 
     stateUnit.dispose();
@@ -74,15 +87,15 @@ describe('createDiscoverStateUnit', () => {
     stateUnit.dispose();
   });
 
-  it('reports loading when resources are undefined', async () => {
-    const resources$ = new BehaviorSubject<unknown[] | undefined>(undefined);
-    const { client } = mockClient({ resources$ });
+  it('reports loading true initially and false after page loads', async () => {
+    let resolve!: (v: PageResult) => void;
+    const pending = new Promise<PageResult>((res) => { resolve = res; });
+    const { client } = mockClient({ resourcesPageFn: () => pending });
     const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
-    const loading = await firstValueFrom(stateUnit.isLoadingRecent$);
-    expect(loading).toBe(true);
+    expect(await firstValueFrom(stateUnit.isLoadingRecent$)).toBe(true);
 
-    resources$.next([]);
+    resolve({ resources: [], total: 0, offset: 0, limit: 50 });
     const loaded = await firstValueFrom(stateUnit.isLoadingRecent$.pipe(filter((l) => !l)));
     expect(loaded).toBe(false);
 
@@ -100,47 +113,118 @@ describe('createDiscoverStateUnit', () => {
     stateUnit.dispose();
   });
 
-  it('disposes browse and search on dispose', () => {
-    const browse = mockBrowse();
-    const { client } = mockClient();
-    const stateUnit = createDiscoverStateUnit(client, browse);
-    stateUnit.dispose();
-
-    expect(browse.dispose).toHaveBeenCalled();
-  });
-
   it('initial selectedEntityType$ is empty and recent fetch carries no entityType', async () => {
-    const { client, resourceCalls } = mockClient();
+    const { client, pagesCalls } = mockClient();
     const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
-    await firstValueFrom(stateUnit.recentResources$);
+    // Wait for first page to load
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
 
-    expect(resourceCalls).toHaveLength(1);
-    expect(resourceCalls[0]).toEqual({ limit: 10, archived: false });
+    expect(pagesCalls).toHaveLength(1);
+    expect(pagesCalls[0]).toEqual({ limit: 50, archived: false, offset: 0 });
     expect(await firstValueFrom(stateUnit.selectedEntityType$)).toBe('');
 
     stateUnit.dispose();
   });
 
-  it('setSelectedEntityType drives a refetch with the entityType filter', async () => {
-    const { client, resourceCalls } = mockClient();
+  it('setSelectedEntityType resets list and refetches with entityType filter', async () => {
+    const { client, pagesCalls } = mockClient();
     const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
-    // Prime the first subscription so the switchMap is live.
-    const sub = stateUnit.recentResources$.subscribe();
+    // Wait for initial load
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
 
     stateUnit.setSelectedEntityType('Person');
 
-    expect(await firstValueFrom(stateUnit.selectedEntityType$)).toBe('Person');
-    // Two calls expected: initial '' then 'Person'.
-    expect(resourceCalls.length).toBeGreaterThanOrEqual(2);
-    expect(resourceCalls.at(-1)).toEqual({ limit: 10, archived: false, entityType: 'Person' });
+    // Wait for refetch
+    await new Promise((res) => setTimeout(res, 10));
 
-    sub.unsubscribe();
+    expect(pagesCalls.length).toBeGreaterThanOrEqual(2);
+    expect(pagesCalls.at(-1)).toEqual({ limit: 50, archived: false, offset: 0, entityType: 'Person' });
+
     stateUnit.dispose();
   });
 
-  it('search with an empty query yields no results without hitting the wire', async () => {
+  it('recentTotal$ reflects total from resourcesPage response', async () => {
+    const { client } = mockClient({
+      resourcesPageFn: () => Promise.resolve({ resources: [{ '@id': 'r1' }], total: 999, offset: 0, limit: 50 }),
+    });
+    const stateUnit = createDiscoverStateUnit(client, mockBrowse());
+
+    const total = await firstValueFrom(stateUnit.recentTotal$.pipe(filter((t) => t > 0)));
+    expect(total).toBe(999);
+
+    stateUnit.dispose();
+  });
+
+  it('hasMoreRecent$ is true when resources.length < total', async () => {
+    const { client } = mockClient({
+      resourcesPageFn: () => Promise.resolve({ resources: [{ '@id': 'r1' }], total: 100, offset: 0, limit: 50 }),
+    });
+    const stateUnit = createDiscoverStateUnit(client, mockBrowse());
+
+    const hasMore = await firstValueFrom(stateUnit.hasMoreRecent$.pipe(filter(Boolean)));
+    expect(hasMore).toBe(true);
+
+    stateUnit.dispose();
+  });
+
+  it('hasMoreRecent$ is false when all resources are loaded', async () => {
+    const { client } = mockClient({
+      resourcesPageFn: () => Promise.resolve({ resources: [{ '@id': 'r1' }], total: 1, offset: 0, limit: 50 }),
+    });
+    const stateUnit = createDiscoverStateUnit(client, mockBrowse());
+
+    // Wait for load
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
+    const hasMore = await firstValueFrom(stateUnit.hasMoreRecent$);
+    expect(hasMore).toBe(false);
+
+    stateUnit.dispose();
+  });
+
+  it('loadMoreRecent appends next page to recentResources$', async () => {
+    let call = 0;
+    const { client } = mockClient({
+      resourcesPageFn: (_f) => {
+        call++;
+        if (call === 1) return Promise.resolve({ resources: [{ '@id': 'r1' }], total: 2, offset: 0, limit: 50 });
+        return Promise.resolve({ resources: [{ '@id': 'r2' }], total: 2, offset: 1, limit: 50 });
+      },
+    });
+    const stateUnit = createDiscoverStateUnit(client, mockBrowse());
+
+    // Wait for initial load
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
+
+    stateUnit.loadMoreRecent();
+
+    const all = await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length >= 2)));
+    expect(all.map((r: any) => r['@id'])).toEqual(['r1', 'r2']);
+
+    stateUnit.dispose();
+  });
+
+  it('filter change resets accumulated resources and fetches page 0', async () => {
+    const { client, pagesCalls } = mockClient();
+    const stateUnit = createDiscoverStateUnit(client, mockBrowse());
+
+    // Wait for initial load
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
+
+    stateUnit.setSelectedEntityType('Article');
+    // After reset, recentResources$ should briefly be []
+    // then populate after refetch
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
+
+    const lastCall = pagesCalls.at(-1)!;
+    expect(lastCall.offset).toBe(0);
+    expect(lastCall.entityType).toBe('Article');
+
+    stateUnit.dispose();
+  });
+
+  it('search with an empty query yields no results without hitting resourcesPage', async () => {
     vi.useFakeTimers();
     try {
       const { client, resourceCalls } = mockClient();
@@ -162,7 +246,7 @@ describe('createDiscoverStateUnit', () => {
     }
   });
 
-  it('search with a non-empty query and selected entityType pushes both into the filter', async () => {
+  it('search with a non-empty query pushes search and entityType into resources filter', async () => {
     vi.useFakeTimers();
     try {
       const results$ = new BehaviorSubject<unknown[] | undefined>([{ '@id': 'hit' }]);
@@ -253,17 +337,33 @@ describe('createDiscoverStateUnit', () => {
   });
 
   it('omits entityType from the filter when the empty sentinel is selected', async () => {
-    const { client, resourceCalls } = mockClient();
+    const { client, pagesCalls } = mockClient();
     const stateUnit = createDiscoverStateUnit(client, mockBrowse());
 
-    const sub = stateUnit.recentResources$.subscribe();
+    // Wait for initial load then switch entity type twice
+    await firstValueFrom(stateUnit.recentResources$.pipe(filter((r) => r.length > 0)));
     stateUnit.setSelectedEntityType('Person');
+    await new Promise((res) => setTimeout(res, 10));
     stateUnit.setSelectedEntityType('');
+    await new Promise((res) => setTimeout(res, 10));
 
-    const last = resourceCalls.at(-1)!;
+    const last = pagesCalls.at(-1)!;
     expect(last.entityType).toBeUndefined();
 
-    sub.unsubscribe();
     stateUnit.dispose();
+  });
+});
+
+describe('DiscoverStateUnit — StateUnit axioms', () => {
+  it('satisfies the StateUnit axioms (incl. A7-passed: never disposes the injected browse)', () => {
+    assertStateUnitAxioms({
+      setup: () => {
+        const browse = disposeProbe();
+        const { client } = mockClient();
+        return { unit: createDiscoverStateUnit(client, browse as unknown as ShellStateUnit), passedIn: [browse] };
+      },
+      surfaces: (u) => [u.selectedEntityType$],
+      invocations: (u) => [() => u.setSelectedEntityType('')],
+    });
   });
 });
