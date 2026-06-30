@@ -24,7 +24,7 @@ import { Subscription, from } from 'rxjs';
 import { mergeMap } from 'rxjs/operators';
 import type { SemiontProject } from '@semiont/core/node';
 import type { EventMap, Logger, components } from '@semiont/core';
-import { EventBus, resourceId, annotationId, errField, getResourceEntityTypes } from '@semiont/core';
+import { EventBus, resourceId, annotationId, errField } from '@semiont/core';
 import { withActorSpan } from '@semiont/observability';
 import { getExactText, getTargetSource, getTargetSelector, getBodySource } from '@semiont/core';
 import { EventQuery } from '@semiont/event-sourcing';
@@ -115,28 +115,23 @@ export class Browser {
 
   private async handleBrowseResources(event: EventMap['browse:resources-requested']): Promise<void> {
     try {
-      let filteredDocs = await ResourceContext.listResources({
-        search: event.search,
-        archived: event.archived,
-      }, this.kb);
-
-      if (event.entityType) {
-        filteredDocs = filteredDocs.filter((doc) => getResourceEntityTypes(doc).includes(event.entityType!));
-      }
-
       const offset = event.offset ?? 0;
       const limit = event.limit ?? 50;
-      const paginatedDocs = filteredDocs.slice(offset, offset + limit);
 
-      const formattedDocs = event.search
-        ? await ResourceContext.addContentPreviews(paginatedDocs, this.kb)
-        : paginatedDocs;
+      // Route through in-memory graph to avoid O(N) disk reads on 31k+ corpora.
+      const { resources: page, total } = await this.kb.graph.listResources({
+        search: event.search,
+        archived: event.archived,
+        entityTypes: event.entityType ? [event.entityType] : undefined,
+        offset,
+        limit,
+      });
 
       this.eventBus.get('browse:resources-result').next({
         correlationId: event.correlationId,
         response: {
-          resources: formattedDocs,
-          total: filteredDocs.length,
+          resources: page,
+          total,
           offset,
           limit,
         },

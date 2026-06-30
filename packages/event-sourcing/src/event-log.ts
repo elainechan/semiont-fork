@@ -64,6 +64,14 @@ export class EventLog {
   }
 
   /**
+   * Get resource IDs with event directories modified after `since`.
+   * Used for incremental graph rebuild — skips resources unchanged since snapshot.
+   */
+  async getModifiedResourceIds(since: Date): Promise<ResourceId[]> {
+    return this.storage.getModifiedResourceIds(since);
+  }
+
+  /**
    * Query events with filter
    * @param resourceId - Branded ResourceId (from @semiont/core)
    * @param filter - Optional event filter
