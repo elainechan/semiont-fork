@@ -36,13 +36,10 @@ export * from './client';
 // results directly without `lastValueFrom`/`firstValueFrom` wrappers.
 export { StreamObservable, CacheObservable, UploadObservable, type UploadProgress } from './awaitable';
 
-// Bus-request helper.
-export {
-  busRequest,
-  BusRequestError,
-  type BusRequestErrorCode,
-  type BusRequestPrimitive,
-} from './bus-request';
+// `busRequest` / `BusRequestPrimitive` live in @semiont/core (next to the bus
+// protocol they're coupled to) — import those from there. `BusRequestError` (and
+// its `BusRequestErrorCode`) are re-exported below for catch-convenience, so
+// consumers catch every SDK error from one package.
 
 // Verb-oriented namespace API. Frame is the schema-layer flow's surface;
 // the others are content-layer flows + job/auth/admin.
@@ -87,6 +84,9 @@ export type {
   ConnectionState,
   IContentTransport,
   ITransport,
+  // Transport-neutral error-code vocabulary (route on `error.code`).
+  TransportErrorCode,
+  BusRequestErrorCode,
 } from '@semiont/core';
 export {
   // Brand-cast functions
@@ -99,6 +99,9 @@ export {
   userId,
   // Unified error base — every Semiont-thrown error extends this.
   SemiontError,
+  // Bus-mediated command error — re-exported for catch-convenience (defined in
+  // @semiont/core next to busRequest; busRequest itself stays core-only).
+  BusRequestError,
 } from '@semiont/core';
 
 // Session layer — per-KB sessions, app-level browser, storage adapter,

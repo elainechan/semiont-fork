@@ -4,6 +4,7 @@ import { filter, skip, take, toArray } from 'rxjs/operators';
 import type { SemiontClient } from '@semiont/sdk';
 import type { ShellStateUnit } from '../../../../state/shell-state-unit';
 import { createDiscoverStateUnit } from '../discover-state-unit';
+import { assertStateUnitAxioms, disposeProbe } from '@semiont/core/testing';
 
 function mockBrowse(): ShellStateUnit {
   return { dispose: vi.fn() } as unknown as ShellStateUnit;
@@ -110,15 +111,6 @@ describe('createDiscoverStateUnit', () => {
     expect(stateUnit.search.state$).toBeDefined();
 
     stateUnit.dispose();
-  });
-
-  it('disposes browse and subjects on dispose', () => {
-    const browse = mockBrowse();
-    const { client } = mockClient();
-    const stateUnit = createDiscoverStateUnit(client, browse);
-    stateUnit.dispose();
-
-    expect(browse.dispose).toHaveBeenCalled();
   });
 
   it('initial selectedEntityType$ is empty and recent fetch carries no entityType', async () => {
@@ -359,5 +351,19 @@ describe('createDiscoverStateUnit', () => {
     expect(last.entityType).toBeUndefined();
 
     stateUnit.dispose();
+  });
+});
+
+describe('DiscoverStateUnit — StateUnit axioms', () => {
+  it('satisfies the StateUnit axioms (incl. A7-passed: never disposes the injected browse)', () => {
+    assertStateUnitAxioms({
+      setup: () => {
+        const browse = disposeProbe();
+        const { client } = mockClient();
+        return { unit: createDiscoverStateUnit(client, browse as unknown as ShellStateUnit), passedIn: [browse] };
+      },
+      surfaces: (u) => [u.selectedEntityType$],
+      invocations: (u) => [() => u.setSelectedEntityType('')],
+    });
   });
 });

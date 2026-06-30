@@ -12,7 +12,7 @@ import type {
   components,
 } from '@semiont/core';
 import type { ITransport } from '@semiont/core';
-import { busRequest } from '../bus-request';
+import { busRequest } from '@semiont/core';
 import { StreamObservable } from '../awaitable';
 import type {
   MarkNamespace as IMarkNamespace,
@@ -32,26 +32,42 @@ export class MarkNamespace implements IMarkNamespace {
     // for routing — we derive it from `input.target.source`, which is the
     // same value semantically.
     const resourceId = toResourceId(input.target.source);
-    const result = await busRequest<{ annotationId: string }>(
+    const result = await busRequest(
       this.transport,
       'mark:create-request',
       { resourceId, request: input },
-      'mark:create-ok',
-      'mark:create-failed',
     );
     return { annotationId: toAnnotationId(result.annotationId) };
   }
 
   async delete(resourceId: ResourceId, annotationId: AnnotationId): Promise<void> {
-    await this.transport.emit('mark:delete', { annotationId, resourceId });
+    // Confirmed write (matches `annotation()` above): await the backend's
+    // correlation-keyed reply and REJECT on failure, rather than fire-and-forget
+    // an emit whose mark:delete-failed nobody awaited (.plans/bugs/BRIDGE-GAPS.md).
+    await busRequest(
+      this.transport,
+      'mark:delete',
+      { annotationId, resourceId },
+    );
   }
 
   async archive(resourceId: ResourceId): Promise<void> {
-    await this.transport.emit('mark:archive', { resourceId });
+    // Confirmed write: await the backend's correlation-keyed reply and REJECT on
+    // failure, rather than fire-and-forget an emit whose failure had nowhere to go
+    // (.plans/bugs/BRIDGE-GAPS.md).
+    await busRequest(
+      this.transport,
+      'mark:archive',
+      { resourceId },
+    );
   }
 
   async unarchive(resourceId: ResourceId): Promise<void> {
-    await this.transport.emit('mark:unarchive', { resourceId });
+    await busRequest(
+      this.transport,
+      'mark:unarchive',
+      { resourceId },
+    );
   }
 
   assist(resourceId: ResourceId, motivation: Motivation, options: MarkAssistOptions): StreamObservable<MarkAssistEvent> {
@@ -84,8 +100,8 @@ export class MarkNamespace implements IMarkNamespace {
           if (done) return;
           pollInterval = setInterval(() => {
             if (done) return;
-            busRequest<{ status: string; result?: unknown; error?: string; jobType?: string }>(
-              this.transport, 'job:status-requested', { jobId }, 'job:status-result', 'job:status-failed',
+            busRequest(
+              this.transport, 'job:status-requested', { jobId },
             ).then((status) => {
                 if (done) return;
                 if (status.status === 'complete') {
@@ -95,7 +111,7 @@ export class MarkNamespace implements IMarkNamespace {
                     kind: 'complete',
                     data: {
                       jobId,
-                      jobType: (status.jobType ?? 'annotation') as components['schemas']['JobType'],
+                      jobType: (status.type ?? 'annotation') as components['schemas']['JobType'],
                       resourceId: resourceId as string,
                       result: status.result as components['schemas']['JobResult'] | undefined,
                     },
@@ -253,12 +269,10 @@ export class MarkNamespace implements IMarkNamespace {
     if (options.schemaId !== undefined) params.schemaId = options.schemaId;
     if (options.categories !== undefined) params.categories = options.categories;
 
-    return busRequest<{ jobId: string }>(
+    return busRequest(
       this.transport,
       'job:create',
       { jobType, resourceId, params },
-      'job:created',
-      'job:create-failed',
     );
   }
 }

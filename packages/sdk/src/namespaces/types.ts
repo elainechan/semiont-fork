@@ -350,6 +350,9 @@ export interface GatherNamespace {
       maxResources?: number;
       includeContent?: boolean;
       includeSummary?: boolean;
+      /** Entity types to exclude from the semantic recall built into the context
+       *  (e.g. ['Question'] so prior questions never ground answer generation). */
+      excludeEntityTypes?: string[];
     },
   ): Promise<GatheredContext>;
 }
@@ -445,7 +448,7 @@ export interface JobNamespace {
 
   status(jobId: JobId): Promise<JobStatusResponse>;
   pollUntilComplete(jobId: JobId, options?: { interval?: number; timeout?: number; onProgress?: (status: JobStatusResponse) => void }): Promise<JobStatusResponse>;
-  cancelByType(jobType: 'annotation' | 'generation'): Promise<void>;
+  cancelByType(jobType: 'annotation' | 'generation'): Promise<number>;
 
   /** UI signal: cancel all active jobs of a given type (e.g. "annotation"). */
   cancelRequest(jobType: 'annotation' | 'generation'): void;

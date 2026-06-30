@@ -15,7 +15,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventBus, type ResourceId, type UserId, type AnnotationId, type PersistedEvent } from '@semiont/core';
-import type { components } from '@semiont/core';
 import type { WorkingTreeStore } from '@semiont/content';
 import { replayEventStream, type ContentBlobResolver } from '../../exchange/replay';
 
@@ -24,13 +23,6 @@ const TEST_RESOURCE = 'test-resource-id' as ResourceId;
 const TEST_ANNOTATION = 'test-annotation-id' as AnnotationId;
 
 /** Minimal ResourceDescriptor stub for yield:created test emissions (value is never inspected). */
-const STUB_RESOURCE: components['schemas']['ResourceDescriptor'] = {
-  '@context': 'https://schema.org',
-  '@id': 'http://test/resources/stub',
-  name: 'stub',
-  representations: [],
-};
-
 /** Minimal AnnotationBodyUpdatedEvent stub for mark:body-updated test emissions. */
 function stubBodyUpdatedEvent(): Extract<PersistedEvent, { type: 'mark:body-updated' }> {
   return {
@@ -121,7 +113,7 @@ describe('replay', () => {
     it('replays an entitytype.added event', async () => {
       eventBus.get('frame:add-entity-type').subscribe((msg) => {
         expect(msg.tag).toBe('Person');
-        defer(() => eventBus.get('frame:entity-type-added').next({ tag: 'Person' } as any));
+        defer(() => eventBus.get('frame:entity-type-add-ok').next({ correlationId: msg.correlationId } as any));
       });
 
       const jsonl = entityTypeEvent('Person');
@@ -144,8 +136,8 @@ describe('replay', () => {
         expect(msg.contentChecksum).toBeDefined();
         expect(msg.format).toBe('text/markdown');
         defer(() => eventBus.get('yield:create-ok').next({
-          resourceId: TEST_RESOURCE,
-          resource: STUB_RESOURCE,
+          correlationId: msg.correlationId,
+          response: { resourceId: TEST_RESOURCE },
         }));
       });
 
@@ -168,7 +160,7 @@ describe('replay', () => {
 
     it('replays an annotation.added event', async () => {
       eventBus.get('mark:create').subscribe(() => {
-        defer(() => eventBus.get('mark:create-ok').next({ annotationId: TEST_ANNOTATION }));
+        defer(() => eventBus.get('mark:create-ok').next({ response: { annotationId: TEST_ANNOTATION } }));
       });
 
       const jsonl = annotationAddedEvent('ann-1');
@@ -203,7 +195,7 @@ describe('replay', () => {
 
     it('replays an annotation.removed event', async () => {
       eventBus.get('mark:delete').subscribe(() => {
-        defer(() => eventBus.get('mark:delete-ok').next({ annotationId: TEST_ANNOTATION }));
+        defer(() => eventBus.get('mark:delete-ok').next({ response: { annotationId: TEST_ANNOTATION } }));
       });
 
       const jsonl = makeStoredEvent({
@@ -335,23 +327,23 @@ describe('replay', () => {
     });
 
     it('replays multiple events and accumulates stats', async () => {
-      eventBus.get('frame:add-entity-type').subscribe(() => {
-        defer(() => eventBus.get('frame:entity-type-added').next({ tag: 'Person' } as any));
+      eventBus.get('frame:add-entity-type').subscribe((msg) => {
+        defer(() => eventBus.get('frame:entity-type-add-ok').next({ correlationId: msg.correlationId } as any));
       });
 
       const contentBlob = Buffer.from('test content');
       const resolver: ContentBlobResolver = (checksum) =>
         checksum === 'sha-1' ? contentBlob : undefined;
 
-      eventBus.get('yield:create').subscribe(() => {
+      eventBus.get('yield:create').subscribe((msg) => {
         defer(() => eventBus.get('yield:create-ok').next({
-          resourceId: TEST_RESOURCE,
-          resource: STUB_RESOURCE,
+          correlationId: msg.correlationId,
+          response: { resourceId: TEST_RESOURCE },
         }));
       });
 
       eventBus.get('mark:create').subscribe(() => {
-        defer(() => eventBus.get('mark:create-ok').next({ annotationId: TEST_ANNOTATION }));
+        defer(() => eventBus.get('mark:create-ok').next({ response: { annotationId: TEST_ANNOTATION } }));
       });
 
       const lines = [

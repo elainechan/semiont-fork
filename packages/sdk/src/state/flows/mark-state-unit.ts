@@ -2,7 +2,7 @@ import { BehaviorSubject, type Observable, type Subscription } from 'rxjs';
 import { timeout } from 'rxjs/operators';
 import type { ResourceId, Motivation, Selector, EventMap, components } from '@semiont/core';
 import type { SemiontClient } from '../../client';
-import type { StateUnit } from '../lib/state-unit';
+import type { StateUnit } from '@semiont/core';
 
 type JobProgress = components['schemas']['JobProgress'];
 
@@ -73,7 +73,7 @@ export function createMarkStateUnit(
         target: { source: resourceId, selector: event.selector as Selector },
         body: event.body,
       });
-      client.bus.get('mark:create-ok').next({ annotationId: result.annotationId });
+      client.bus.get('mark:create-ok').next({ response: { annotationId: result.annotationId } });
     } catch (error) {
       client.bus.get('mark:create-failed').next({ message: error instanceof Error ? error.message : String(error) });
     }
@@ -82,7 +82,7 @@ export function createMarkStateUnit(
   subs.push(client.bus.get('mark:delete').subscribe(async (event) => {
     try {
       await client.mark.delete(resourceId, event.annotationId as Parameters<typeof client.mark.delete>[1]);
-      client.bus.get('mark:delete-ok').next({ annotationId: event.annotationId });
+      client.bus.get('mark:delete-ok').next({ response: { annotationId: event.annotationId } });
     } catch (error) {
       client.bus.get('mark:delete-failed').next({ message: error instanceof Error ? error.message : String(error) });
     }

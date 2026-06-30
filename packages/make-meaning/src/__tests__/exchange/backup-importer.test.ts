@@ -9,7 +9,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable, Writable } from 'node:stream';
 import type { Logger, ResourceId, UserId } from '@semiont/core';
-import type { components } from '@semiont/core';
 import { EventBus } from '@semiont/core';
 import type { WorkingTreeStore } from '@semiont/content';
 import { importBackup } from '../../exchange/backup-importer';
@@ -25,13 +24,6 @@ function bufferToReadable(buf: Buffer): Readable {
 
 const TEST_USER = 'did:web:localhost:users:test' as UserId;
 const TEST_RESOURCE = 'test-resource-id' as ResourceId;
-
-const STUB_RESOURCE: components['schemas']['ResourceDescriptor'] = {
-  '@context': 'https://schema.org',
-  '@id': 'http://test/resources/stub',
-  name: 'stub',
-  representations: [],
-};
 
 const mockLogger: Logger = {
   debug: vi.fn(),
@@ -115,8 +107,8 @@ describe('backup-importer', () => {
 
   it('imports a backup with system events', async () => {
     // Wire up handler for entity type addition
-    eventBus.get('frame:add-entity-type').subscribe(() => {
-      defer(() => eventBus.get('frame:entity-type-added').next({ tag: 'Person' } as any));
+    eventBus.get('frame:add-entity-type').subscribe((msg) => {
+      defer(() => eventBus.get('frame:entity-type-add-ok').next({ correlationId: msg.correlationId } as any));
     });
 
     const manifestLines = [
@@ -147,8 +139,8 @@ describe('backup-importer', () => {
       expect(msg.storageUri).toBeDefined();
       expect(msg.contentChecksum).toBeDefined();
       defer(() => eventBus.get('yield:create-ok').next({
-        resourceId: TEST_RESOURCE,
-        resource: STUB_RESOURCE,
+        correlationId: msg.correlationId,
+        response: { resourceId: TEST_RESOURCE },
       }));
     });
 
@@ -182,8 +174,8 @@ describe('backup-importer', () => {
     eventBus.get('yield:create').subscribe((msg) => {
       receivedChecksum = msg.contentChecksum;
       defer(() => eventBus.get('yield:create-ok').next({
-        resourceId: TEST_RESOURCE,
-        resource: STUB_RESOURCE,
+        correlationId: msg.correlationId,
+        response: { resourceId: TEST_RESOURCE },
       }));
     });
 
@@ -277,16 +269,16 @@ describe('backup-importer', () => {
   it('imports system events before resource events (order matters)', async () => {
     const order: string[] = [];
 
-    eventBus.get('frame:add-entity-type').subscribe(() => {
+    eventBus.get('frame:add-entity-type').subscribe((msg) => {
       order.push('entity-type');
-      defer(() => eventBus.get('frame:entity-type-added').next({ tag: 'Person' } as any));
+      defer(() => eventBus.get('frame:entity-type-add-ok').next({ correlationId: msg.correlationId } as any));
     });
 
-    eventBus.get('yield:create').subscribe(() => {
+    eventBus.get('yield:create').subscribe((msg) => {
       order.push('resource-created');
       defer(() => eventBus.get('yield:create-ok').next({
-        resourceId: TEST_RESOURCE,
-        resource: STUB_RESOURCE,
+        correlationId: msg.correlationId,
+        response: { resourceId: TEST_RESOURCE },
       }));
     });
 
@@ -316,14 +308,14 @@ describe('backup-importer', () => {
   });
 
   it('merges stats across multiple streams', async () => {
-    eventBus.get('frame:add-entity-type').subscribe(() => {
-      defer(() => eventBus.get('frame:entity-type-added').next({ tag: 'X' } as any));
+    eventBus.get('frame:add-entity-type').subscribe((msg) => {
+      defer(() => eventBus.get('frame:entity-type-add-ok').next({ correlationId: msg.correlationId } as any));
     });
 
-    eventBus.get('yield:create').subscribe(() => {
+    eventBus.get('yield:create').subscribe((msg) => {
       defer(() => eventBus.get('yield:create-ok').next({
-        resourceId: TEST_RESOURCE,
-        resource: STUB_RESOURCE,
+        correlationId: msg.correlationId,
+        response: { resourceId: TEST_RESOURCE },
       }));
     });
 
