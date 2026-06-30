@@ -35,6 +35,7 @@ export const BUS_OPERATIONS = {
   // ── BROWSE (reads) ──────────────────────────────────────────────
   'browse:resource-requested':           { result: 'browse:resource-result',         failure: 'browse:resource-failed' },
   'browse:resources-requested':          { result: 'browse:resources-result',        failure: 'browse:resources-failed' },
+  'browse:resources-page-requested':    { result: 'browse:resources-page-result',   failure: 'browse:resources-page-failed' },
   'browse:annotation-requested':         { result: 'browse:annotation-result',       failure: 'browse:annotation-failed' },
   'browse:annotations-requested':        { result: 'browse:annotations-result',      failure: 'browse:annotations-failed' },
   'browse:annotation-history-requested': { result: 'browse:annotation-history-result', failure: 'browse:annotation-history-failed' },

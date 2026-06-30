@@ -534,7 +534,7 @@ export const CHANNEL_SCHEMAS = {
   'browse:resources-requested':       'BrowseResourcesRequest',
   'browse:resources-result':          'BrowseResourcesResult',
   'browse:resources-failed':          null,
-  'browse:resources-page-requested':  null, // inline type, paginated graph-based listing
+  'browse:resources-page-requested':  'BrowseResourcesRequest', // reuses request schema; same fields
   'browse:resources-page-result':     null,
   'browse:resources-page-failed':     null,
   'browse:annotations-requested':     'BrowseAnnotationsRequest',

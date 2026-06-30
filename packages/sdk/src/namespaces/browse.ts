@@ -276,7 +276,7 @@ export class BrowseNamespace implements IBrowseNamespace {
     limit: number;
   }> {
     const search = filters?.search ? searchQuery(filters.search) : undefined;
-    return busRequest<{ resources: ResourceDescriptor[]; total: number; offset: number; limit: number }>(
+    return busRequest(
       this.transport,
       'browse:resources-page-requested',
       {
@@ -286,8 +286,6 @@ export class BrowseNamespace implements IBrowseNamespace {
         limit: filters?.limit ?? 50,
         offset: filters?.offset ?? 0,
       },
-      'browse:resources-page-result',
-      'browse:resources-page-failed',
     );
   }
 
